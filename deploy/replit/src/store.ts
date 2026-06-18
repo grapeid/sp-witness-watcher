@@ -1,6 +1,7 @@
 import pg from 'pg';
 
 export interface WitnessStore {
+  migrate(): Promise<void>;
   close(): Promise<void>;
   enroll(aid: string, controllerAid: string): Promise<void>;
   isEnrolled(aid: string): Promise<boolean>;
@@ -24,10 +25,7 @@ export async function openStore(): Promise<WitnessStore> {
     connectionString: dsn,
     ssl: dsn.includes('localhost') ? undefined : { rejectUnauthorized: false },
   });
-  await pool.query('SELECT 1');
-  const store = new PostgresStore(pool);
-  await store.migrate();
-  return store;
+  return new PostgresStore(pool);
 }
 
 class PostgresStore implements WitnessStore {

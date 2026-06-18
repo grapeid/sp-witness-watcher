@@ -26,8 +26,14 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
+  // Bind before DB migration so /health answers within Replit's 5s probe window.
   await app.listen({ port, host });
   console.log(`[sp-witness-watcher] listening on http://${host}:${port}`);
+
+  store.migrate().catch((err) => {
+    console.error('[store] migration failed — shutting down:', err);
+    process.exit(1);
+  });
 }
 
 main().catch((err) => {
