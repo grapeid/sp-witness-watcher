@@ -49,7 +49,9 @@ Deploy **~3 independent instances** behind load balancers for the default witnes
 | Target | Path | Runtime |
 |--------|------|---------|
 | Docker / Linux VPS | repo root (`go run ./cmd/server`) | Go + SQLite |
-| Replit Autoscale | [`deploy/replit/`](deploy/replit/) | Node.js + PostgreSQL |
+| Replit Autoscale | [`deploy/replit/`](deploy/replit/) → hoisted to root at publish | Node.js + PostgreSQL |
+
+Replit playbook (all Grape ID services): [`deploy/REPLIT_DEPLOY_PLAYBOOK.md`](deploy/REPLIT_DEPLOY_PLAYBOOK.md)
 
 The Node.js build uses the same HTTP API and Postgres schema. Set production secret `WW_SERVICE_IDENTITY_JSON` on Replit so the witness AID stays stable across deploys.
 
