@@ -19,7 +19,8 @@ Same contract as the Go service:
 
 1. Enable **Replit SQL Database** (PostgreSQL) — `DATABASE_URL` is injected automatically.
 2. In **Publishing → Secrets**, set production `WW_SERVICE_IDENTITY_JSON` with a stable witness AID (generate once locally, never regenerate in prod).
-3. Publish with **Autoscale** (configured in `.replit`).
+3. Set **`WW_INSTANCE`** to `1`, `2`, or `3` so `/enroll` returns `witnessN` / `watcherN` hint URLs (defaults to `1`).
+4. Publish with **Autoscale** (configured in `.replit`).
 
 ### Stable service identity (required in production)
 

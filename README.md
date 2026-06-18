@@ -2,7 +2,7 @@
 
 M67 Commercial Witness + Watcher Service — hosted implementation of M11 witness protocol and M12 watcher protocol.
 
-One codebase, two API surfaces, shared KEL observation store. Grape ID operates the default instance (`witness.grapeid.org` / `watcher.grapeid.org`); this repo is the reference implementation Rob deploys (~3 instances for the live witness pool).
+One codebase, two API surfaces, shared KEL observation store. Grape ID operates a pool of numbered instances (`witness1`–`witness3` / `watcher1`–`watcher3` at `*.grapeid.org`); set `WW_INSTANCE=1|2|3` per deployment (or `WW_WITNESS_PUBLIC_URL` / `WW_WATCHER_PUBLIC_URL`).
 
 ## APIs
 

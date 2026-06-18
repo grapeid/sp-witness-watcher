@@ -116,6 +116,7 @@ Keep `deploy/replit/` in git as the **source of truth**; sync hoisted copies bac
 |--------|----------|-------|
 | `DATABASE_URL` | Yes | Auto-injected by Replit SQL Database |
 | `{SVC}_SERVICE_IDENTITY_JSON` | Yes | Single-line JSON: `aid`, `public_key_b64`, `private_seed_b64` |
+| `WW_INSTANCE` | Witness pool | `1`, `2`, or `3` → `witnessN` / `watcherN` enroll hints (witness-watcher only) |
 | `{SVC}_DEV_SKIP_SIG` | Dev only | Skip issuer signature verify during testing |
 | `{SVC}_ANCHORING_ENABLED` | Optional | BRR only; default `false` |
 
@@ -231,8 +232,9 @@ Documented from `sp-witness-watcher` and `sp-blind-revocation-registry` publish 
 
 | Domain | Repo | Runtime | Replit target | Identity secret |
 |--------|------|---------|---------------|-----------------|
-| witness.grapeid.org | sp-witness-watcher | Node.js | Autoscale | `WW_SERVICE_IDENTITY_JSON` |
-| watcher.grapeid.org | sp-witness-watcher | Node.js | Autoscale | (same deployment) |
+| witness1.grapeid.org / watcher1 | sp-witness-watcher | Node.js | Autoscale | `WW_INSTANCE=1`, unique `WW_SERVICE_IDENTITY_JSON` |
+| witness2 / watcher2 | sp-witness-watcher | Node.js | Autoscale | `WW_INSTANCE=2`, unique identity |
+| witness3 / watcher3 | sp-witness-watcher | Node.js | Autoscale | `WW_INSTANCE=3`, unique identity |
 | brr.grapeid.org | sp-blind-revocation-registry | Node.js | Autoscale | `BRR_SERVICE_IDENTITY_JSON` |
 | relay.grapeid.org | sp-url-relay | Go | Reserved VM | (relay AID in env/config) |
 

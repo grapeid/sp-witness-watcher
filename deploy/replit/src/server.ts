@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { currentSeq, kelDigestAtSeq } from './digest.js';
 import { marshalSorted } from './json-canonical.js';
 import { IpLimiter } from './rate-limit.js';
+import { witnessEventUrl, watcherKelDigestUrl } from './public-urls.js';
 import { sign, type ServiceIdentity } from './signer.js';
 import { ConflictError, type WitnessStore } from './store.js';
 
@@ -134,8 +135,8 @@ export function buildServer(ctx: AppContext): FastifyInstance {
     return {
       enrolled: true,
       aid,
-      watcher_hint_url: 'https://watcher.grapeid.org/public/kel-digest',
-      witness_url: 'https://witness.grapeid.org/witness/event',
+      watcher_hint_url: watcherKelDigestUrl(),
+      witness_url: witnessEventUrl(),
       observed_since: new Date().toISOString(),
     };
   });

@@ -181,11 +181,10 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	watcherURL := "https://watcher.grapeid.org/public/kel-digest"
 	jsonOK(w, map[string]interface{}{
 		"enrolled": true, "aid": req.AID,
-		"watcher_hint_url": watcherURL,
-		"witness_url": "https://witness.grapeid.org/witness/event",
+		"watcher_hint_url": watcherKelDigestURL(),
+		"witness_url":      witnessEventURL(),
 		"observed_since": time.Now().UTC().Format(time.RFC3339),
 	})
 	log.Printf("[M67] enrolled aid=%s controller=%s", req.AID, controller)
