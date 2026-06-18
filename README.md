@@ -44,6 +44,15 @@ docker run -p 8092:8092 -v ww-data:/data sp-witness-watcher
 
 Deploy **~3 independent instances** behind load balancers for the default witness pool (T-142). Each instance holds its own service KERI AID; verifiers cross-check via M12 L2/L3 for plurality.
 
+## Deploy targets
+
+| Target | Path | Runtime |
+|--------|------|---------|
+| Docker / Linux VPS | repo root (`go run ./cmd/server`) | Go + SQLite |
+| Replit Autoscale | [`deploy/replit/`](deploy/replit/) | Node.js + PostgreSQL |
+
+The Node.js build uses the same HTTP API and Postgres schema. Set production secret `WW_SERVICE_IDENTITY_JSON` on Replit so the witness AID stays stable across deploys.
+
 ## Related
 
 - M11 witness protocol — `identity-bot/identity-agent-core`

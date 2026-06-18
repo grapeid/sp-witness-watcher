@@ -1,0 +1,42 @@
+# Replit entrypoint — Node.js witness/watcher lives in deploy/replit/
+modules = ["nodejs-20", "postgresql-16"]
+
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-24_05"
+
+[env]
+PORT = "5000"
+HOST = "0.0.0.0"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[deployment]
+deploymentTarget = "autoscale"
+build = ["sh", "-c", "cd deploy/replit && npm install && npm run build"]
+run = ["sh", "-c", "cd deploy/replit && npm run start"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "sh -c 'cd deploy/replit && npm install && npm run dev'"
+waitForPort = 5000

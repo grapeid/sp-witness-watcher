@@ -1,0 +1,13 @@
+/data/
+*.db
+.DS_Store
+
+# Go
+/bin/
+
+# Node (deploy/replit)
+deploy/replit/node_modules/
+deploy/replit/dist/
+
+# Local identity (never commit)
+service_identity.json
