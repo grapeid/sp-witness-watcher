@@ -1,13 +1,14 @@
-/data/
-*.db
-.DS_Store
-
 # Go
-/bin/
+/data/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
 
-# Node (deploy/replit)
-deploy/replit/node_modules/
-deploy/replit/dist/
-
-# Local identity (never commit)
-service_identity.json
+# Node
+node_modules/
+dist/
+package-lock.json
