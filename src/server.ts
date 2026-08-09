@@ -3,7 +3,7 @@ import { currentSeq, kelDigestAtSeq } from './digest.js';
 import { marshalSorted } from './json-canonical.js';
 import { IpLimiter } from './rate-limit.js';
 import { witnessEventUrl, watcherKelDigestUrl } from './public-urls.js';
-import { sign, type ServiceIdentity } from './signer.js';
+import { sign, cesrSignature, type ServiceIdentity } from './signer.js';
 import { ConflictError, type WitnessStore } from './store.js';
 
 export interface AppContext {
@@ -52,19 +52,43 @@ export function buildServer(ctx: AppContext): FastifyInstance {
         }
         throw err;
       }
+      // A receipt covers the EVENT, and the event names itself: its `d` is a
+      // digest of its own contents, so a signature over that identifier is a
+      // signature over the event and nothing else.
+      //
+      // What stood here signed a JSON receipt body whose `d` was the rolling
+      // KEL digest at this sequence number. That is a fine thing to compute —
+      // it is what the watcher role compares — but it is not the event's
+      // identifier, so a verifier checking "did a witness sign this event?"
+      // could never answer yes. It also meant the signature covered a
+      // re-serialised object, which only verifies if both sides reproduce
+      // identical bytes.
+      const eventSaid = typeof event['d'] === 'string' ? (event['d'] as string) : '';
+      if (!eventSaid) {
+        return reply.code(400).send({ error: 'event carries no identifier to receipt' });
+      }
+      const cesrSig = cesrSignature(ctx.identity, new TextEncoder().encode(eventSaid));
       const receiptBody = marshalSorted({
         v: 'KERI10JSON',
         t: 'rct',
-        d: digest,
+        d: eventSaid,
         i: ctx.identity.aid,
         aid,
         seq,
         dt: new Date().toISOString(),
       });
-      const receiptBytes = new TextEncoder().encode(receiptBody);
       return {
         receipt: JSON.parse(receiptBody) as Record<string, unknown>,
-        signature: sign(ctx.identity, receiptBytes),
+        // The fields a controller needs to check this without asking anything
+        // further: who witnessed, and the signature over the event identifier.
+        witness_aid: ctx.identity.aid,
+        cesr_signature: cesrSig,
+        event_said: eventSaid,
+        // The rolling digest still travels, because the watcher role is about
+        // the log rather than one event, and both questions have callers.
+        kel_digest: digest,
+        // Retained so an existing caller is not broken by this change.
+        signature: sign(ctx.identity, new TextEncoder().encode(receiptBody)),
         signed_by: ctx.identity.aid,
       };
     },

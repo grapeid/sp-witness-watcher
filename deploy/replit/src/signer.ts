@@ -32,7 +32,7 @@ export async function loadOrCreateIdentity(dataDir: string): Promise<ServiceIden
 
   const priv = ed25519.utils.randomPrivateKey();
   const pub = ed25519.getPublicKey(priv);
-  const aid = 'E' + base64Url(pub).slice(0, 43);
+  const aid = nonTransferableAid(pub);
   const out: IdentityFile = {
     aid,
     public_key_b64: Buffer.from(pub).toString('base64'),
@@ -53,7 +53,49 @@ function parseIdentityFile(raw: IdentityFile): ServiceIdentity {
   if (Buffer.compare(Buffer.from(derivedPub), pub) !== 0) {
     throw new Error('service identity public key does not match seed');
   }
-  return { aid: raw.aid, publicKey: derivedPub, privateKey: priv };
+  // The identifier is DERIVED, never read from the file.
+  //
+  // A witness is named by a non-transferable identifier, which is its verifying
+  // key carrying a prefix — that is what lets anyone check a receipt holding
+  // nothing but the identifier written in the key event. Taking the stored
+  // value on trust would let the file name a key it does not hold, which is the
+  // one thing this kind of identifier is supposed to make impossible.
+  //
+  // Deriving it also means an instance created before this keeps its keys and
+  // simply starts reporting the correct identifier, with no migration and no
+  // regenerated identity.
+  return { aid: nonTransferableAid(derivedPub), publicKey: derivedPub, privateKey: priv };
+}
+
+/**
+ * CESR non-transferable identifier (code "B") for an Ed25519 public key.
+ *
+ * What stood here was `"E" + base64url(key)`, which is not a CESR identifier at
+ * all: "E" denotes a Blake3 digest, and this is not a digest of anything. It was
+ * the right length by coincidence and unparseable by every KERI implementation,
+ * including the one that has to verify our receipts.
+ *
+ * The encoding is not a plain concatenation. A 1-character code needs the raw
+ * bytes padded by one leading zero so the result aligns to base64, and the
+ * leading character of that encoding is then replaced by the code.
+ */
+export function nonTransferableAid(publicKey: Uint8Array): string {
+  const padded = new Uint8Array(1 + publicKey.length);
+  padded.set(publicKey, 1);
+  return 'B' + base64Url(padded).slice(1);
+}
+
+/**
+ * CESR indexed-less signature (code "0B") over the given bytes.
+ *
+ * A 2-character code needs two leading pad bytes, and the two leading
+ * characters of the encoding are replaced by the code.
+ */
+export function cesrSignature(identity: ServiceIdentity, payload: Uint8Array): string {
+  const sig = ed25519.sign(payload, identity.privateKey);
+  const padded = new Uint8Array(2 + sig.length);
+  padded.set(sig, 2);
+  return '0B' + base64Url(padded).slice(2);
 }
 
 /** Base64url signature (no padding), matching Go signer.Sign. */

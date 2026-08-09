@@ -87,13 +87,37 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
+	// A receipt covers the EVENT, and the event names itself: its `d` is a
+	// digest of its own contents, so a signature over that identifier is a
+	// signature over the event and nothing else.
+	//
+	// What stood here signed a JSON receipt body whose `d` was the rolling KEL
+	// digest at this sequence number. That is a fine thing to compute — it is
+	// what the watcher role compares — but it is not the event's identifier, so
+	// a verifier asking "did a witness sign this event?" could never answer yes.
+	eventSaid, _ := req.Event["d"].(string)
+	if eventSaid == "" {
+		writeErr(w, http.StatusBadRequest, "event carries no identifier to receipt")
+		return
+	}
+	cesrSig := s.Identity.CESRSignature([]byte(eventSaid))
 	receiptBody, _ := json.Marshal(map[string]interface{}{
-		"v": "KERI10JSON", "t": "rct", "d": d, "i": s.Identity.AID,
+		"v": "KERI10JSON", "t": "rct", "d": eventSaid, "i": s.Identity.AID,
 		"aid": req.AID, "seq": seq, "dt": time.Now().UTC().Format(time.RFC3339),
 	})
-	sig := s.Identity.Sign(receiptBody)
 	jsonOK(w, map[string]interface{}{
-		"receipt": receiptBody, "signature": sig, "signed_by": s.Identity.AID,
+		"receipt": receiptBody,
+		// The fields a controller needs to check this without asking anything
+		// further: who witnessed, and the signature over the event identifier.
+		"witness_aid":    s.Identity.AID,
+		"cesr_signature": cesrSig,
+		"event_said":     eventSaid,
+		// The rolling digest still travels, because the watcher role is about
+		// the log rather than one event, and both questions have callers.
+		"kel_digest": d,
+		// Retained so an existing caller is not broken by this change.
+		"signature": s.Identity.Sign(receiptBody),
+		"signed_by": s.Identity.AID,
 	})
 }
 
@@ -185,7 +209,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		"enrolled": true, "aid": req.AID,
 		"watcher_hint_url": watcherKelDigestURL(),
 		"witness_url":      witnessEventURL(),
-		"observed_since": time.Now().UTC().Format(time.RFC3339),
+		"observed_since":   time.Now().UTC().Format(time.RFC3339),
 	})
 	log.Printf("[M67] enrolled aid=%s controller=%s", req.AID, controller)
 }

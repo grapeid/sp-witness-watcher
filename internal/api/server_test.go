@@ -38,7 +38,8 @@ func TestWitnessWatcherFlow(t *testing.T) {
 	// Witness event seq 0
 	ev := map[string]interface{}{
 		"event": map[string]interface{}{
-			"v": "KERI10JSON000256_", "t": "icp", "i": "EAlice", "s": "0",
+			"v": "KERI10JSON000256_", "t": "icp", "d": "EAliceEvent0000000000000000000000000000000x",
+			"i": "EAlice", "s": "0",
 			"k": []string{"Dkey1"},
 		},
 		"aid": "EAlice",
@@ -54,7 +55,8 @@ func TestWitnessWatcherFlow(t *testing.T) {
 	// Conflicting event at same seq — must reject (C3)
 	ev2 := map[string]interface{}{
 		"event": map[string]interface{}{
-			"v": "KERI10JSON000256_", "t": "icp", "i": "EAlice", "s": "0",
+			"v": "KERI10JSON000256_", "t": "icp", "d": "EAliceForked000000000000000000000000000000x",
+			"i": "EAlice", "s": "0",
 			"k": []string{"DkeyFORK"},
 		},
 		"aid": "EAlice",
