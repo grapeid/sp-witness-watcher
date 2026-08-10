@@ -35,22 +35,34 @@ func (s *Server) Router() chi.Router {
 
 	r.Get("/health", s.handleHealth)
 
+	roles := RolesFromEnv()
+
 	witnessRoutes := func(r chi.Router) {
 		r.Post("/event", s.handleWitnessEvent)
 		r.Get("/kel/{aid}", s.handleWitnessKel)
 	}
-	r.Route("/witness", witnessRoutes)
-	// Also under /api, which is where an Identity Agent serves its own witness
-	// routes. Without this a controller has to know which kind of witness it is
-	// talking to in order to address it, and the agent's own broadcast builds
-	// the /api path — so every submission here answered 404 and was recorded as
-	// the witness being offline.
-	r.Route("/api/witness", witnessRoutes)
+	if roles.Witness {
+		r.Route("/witness", witnessRoutes)
+		// Also under /api, which is where an Identity Agent serves its own
+		// witness routes. Without this a controller has to know which kind of
+		// witness it is talking to in order to address it, and the agent's own
+		// broadcast builds the /api path — so every submission here answered
+		// 404 and was recorded as the witness being offline.
+		r.Route("/api/witness", witnessRoutes)
+	}
 
-	r.Route("/public", func(r chi.Router) {
-		r.Get("/kel-digest", s.handleKelDigest)
-		r.Post("/kel-check", s.handleKelCheck)
-	})
+	// The watcher side: what this service has seen of other identities' logs,
+	// answered rather than pushed. A watcher never volunteers an alert; the
+	// verifier compares and decides for itself, which is what makes a
+	// fraudulent-report attack pointless.
+	if roles.Watcher {
+		watcherRoutes := func(r chi.Router) {
+			r.Get("/kel-digest", s.handleKelDigest)
+			r.Post("/kel-check", s.handleKelCheck)
+		}
+		r.Route("/public", watcherRoutes)
+		r.Route("/api/public", watcherRoutes)
+	}
 
 	r.Post("/enroll", s.handleEnroll)
 
@@ -61,6 +73,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]interface{}{
 		"status": "active", "service": "sp-witness-watcher",
 		"service_aid": s.Identity.AID,
+		// What this instance actually offers, so an operator and a relying
+		// party read the same answer rather than inferring it from a 404.
+		"roles": RolesFromEnv().Enabled(),
 	})
 }
 
