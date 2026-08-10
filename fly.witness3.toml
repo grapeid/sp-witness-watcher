@@ -1,0 +1,61 @@
+# Instance 3. Identical to fly.toml except for the app name and the instance
+# number — same image, same build, same configuration.
+#
+# A separate app rather than more machines under one, because each instance must
+# be a DIFFERENT witness. Its identity is generated into its own volume, so three
+# apps means three independent observers; three machines sharing a volume would
+# be one observer answering on three addresses, and a controller naming all three
+# would believe it had corroboration it does not have.
+#
+# No dedicated IPv4 is allocated. Fly gives every app a shared v4 and a free v6,
+# which is what instance 1 uses and is all an HTTPS service needs — a dedicated
+# address is rented per app and buys nothing here.
+
+# Fly.io deployment for one witness/watcher instance.
+#
+# One app per instance, because each is a separate witness with its own
+# identity: a controller names three of them so that no single operator can
+# equivocate about its key history, and three names pointing at one machine
+# would be one observer wearing three hats.
+#
+# Set WW_INSTANCE per app (1, 2, 3) so the enrolment hints it hands out name
+# the right public host.
+
+app = "grapeid-witness3"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8092"
+  HOST = "0.0.0.0"
+  WW_DATA_DIR = "/data"
+  WW_INSTANCE = "3"
+
+[http_service]
+  internal_port = 8092
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  # A witness that is asleep when an event arrives is a witness that missed it,
+  # and the controller cannot tell that from one that refused. Kept warm.
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+# The service identity and the key logs it has receipted live here. Losing the
+# volume loses the identity, and a witness that comes back under a new name has
+# silently invalidated every receipt it ever issued.
+[mounts]
+  source = "witness_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
