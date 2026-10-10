@@ -36,11 +36,14 @@ primary_region = "iad"
 [http_service]
   internal_port = 8092
   force_https = true
-  auto_stop_machines = "off"
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  # A witness that is asleep when an event arrives is a witness that missed it,
-  # and the controller cannot tell that from one that refused. Kept warm.
-  min_machines_running = 1
+  # Scales to zero when idle. A sleeping witness does not miss an event: the Fly
+  # proxy holds the inbound request and starts the Machine, which costs about
+  # 1.8s on the first call and nothing afterwards. The service identity lives on
+  # the volume below and survives the stop, so the witness comes back under the
+  # same AID and every receipt it has issued stays valid.
+  min_machines_running = 0
 
   [[http_service.checks]]
     grace_period = "10s"
