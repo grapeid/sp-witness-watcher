@@ -49,11 +49,16 @@ Deploy **~3 independent instances** behind load balancers for the default witnes
 | Target | Path | Runtime |
 |--------|------|---------|
 | Docker / Linux VPS | repo root (`go run ./cmd/server`) | Go + SQLite |
-| Replit Autoscale | [`deploy/replit/`](deploy/replit/) → hoisted to root at publish | Node.js + PostgreSQL |
+| Fly.io | `fly.toml`, `fly.witness2.toml`, `fly.witness3.toml` | Go + SQLite on a volume |
 
-Replit playbook (all Grape ID services): [`deploy/REPLIT_DEPLOY_PLAYBOOK.md`](deploy/REPLIT_DEPLOY_PLAYBOOK.md)
+One app per instance on Fly, because each instance is a separate witness with
+its own AID, and that AID lives on the mounted volume. The instances scale to
+zero when idle and the Fly proxy starts one on the next request, which costs
+about 1.8s cold and returns the same AID it had before.
 
-The Node.js build uses the same HTTP API and Postgres schema. Set production secret `WW_SERVICE_IDENTITY_JSON` on Replit so the witness AID stays stable across deploys.
+`WW_ROLES` selects which roles an instance offers (`witness`, `watcher`, or
+both; empty means both), so a deployment can run the two separately without a
+separate build.
 
 ## Related
 

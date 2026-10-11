@@ -7,8 +7,3 @@
 *.dylib
 *.test
 *.out
-
-# Node
-node_modules/
-dist/
-package-lock.json
