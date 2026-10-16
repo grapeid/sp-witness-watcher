@@ -34,6 +34,17 @@ func (s *Server) Router() chi.Router {
 	r.Use(middleware.RequestID, middleware.RealIP, middleware.Logger, middleware.Recoverer)
 
 	r.Get("/health", s.handleHealth)
+	// Also under /api, for the same reason the witness routes are: an Identity
+	// Agent addresses everything under /api because it serves its own witness
+	// routes there, and its heartbeat builds <base>/api/health. Without this
+	// every heartbeat answered 404 and counted as a failure, so a perfectly
+	// healthy witness marched towards being written off — 288 consecutive
+	// failures, which is 72 hours at a 15 minute interval.
+	//
+	// Mounted here rather than inside the role gates below, because health is
+	// not a role: a watcher-only instance still has to be able to say it is
+	// alive, and it reports which roles it offers in the body.
+	r.Get("/api/health", s.handleHealth)
 
 	roles := RolesFromEnv()
 
@@ -81,12 +92,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 type witnessEventRequest struct {
 	AID string `json:"aid"`
-	// Event is the parsed form, accepted from callers that predate EventB64.
+	// Event is the parsed form. Still read so that a caller sending it gets an
+	// explanation rather than "no event was supplied", but it is no longer
+	// accepted — see event().
 	Event map[string]interface{} `json:"event"`
 	// EventB64 is the event exactly as the controller published it, and
-	// CesrSignature is the controller's signature over those bytes.
+	// CesrSignature is the controller's signature over those bytes. Both are
+	// required.
 	//
-	// Preferred over Event, and for a reason that goes to what a receipt is
+	// It has to be the bytes, for a reason that goes to what a receipt is
 	// worth. An identifier is a digest over an exact byte sequence in an exact
 	// field order, so an event re-encoded from a parsed object is a different
 	// event — and a witness handed only the parsed form cannot tell whether the
@@ -98,27 +112,42 @@ type witnessEventRequest struct {
 
 // event returns the event to receipt, as bytes and parsed.
 //
-// The bytes are authoritative wherever they were supplied. Where they were not,
-// the parsed form is used and the caller is receipted on weaker terms, which is
-// recorded in the response rather than hidden.
-func (req witnessEventRequest) event() (raw []byte, parsed map[string]interface{}, verifiable bool, err error) {
-	if req.EventB64 != "" {
-		raw, err = base64.StdEncoding.DecodeString(req.EventB64)
-		if err != nil {
-			return nil, nil, false, fmt.Errorf("event_b64 is not readable base64: %w", err)
+// The published bytes are now required. The parsed-only form used to be
+// accepted and receipted "on weaker terms", which meant no signature check at
+// all — and the terms were not recorded anywhere, so a caller could not tell a
+// checked receipt from an unchecked one. Worse, the unchecked event was still
+// stored, and storing it moves the digest this service reports for that
+// identity, so anyone could make an identity look duplicitous to the watcher
+// layer by getting there first with a junk event at a sequence number nobody
+// had reached yet.
+//
+// No live caller is affected: the Identity Agent has always sent event_b64
+// with a signature (see SubmitToWitness in identity-agent-core).
+func (req witnessEventRequest) event() (raw []byte, parsed map[string]interface{}, err error) {
+	if req.EventB64 == "" {
+		if req.Event != nil {
+			return nil, nil, fmt.Errorf("send the event as published bytes in event_b64 with " +
+				"cesr_signature over them; the parsed form cannot be verified and is no longer receipted")
 		}
-		if err := json.Unmarshal(raw, &parsed); err != nil {
-			return nil, nil, false, fmt.Errorf("event_b64 does not contain a KERI event: %w", err)
-		}
-		return raw, parsed, true, nil
+		return nil, nil, fmt.Errorf("no event was supplied")
 	}
-	if req.Event == nil {
-		return nil, nil, false, fmt.Errorf("no event was supplied")
+	raw, err = base64.StdEncoding.DecodeString(req.EventB64)
+	if err != nil {
+		return nil, nil, fmt.Errorf("event_b64 is not readable base64: %w", err)
 	}
-	return nil, req.Event, false, nil
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, nil, fmt.Errorf("event_b64 does not contain a KERI event: %w", err)
+	}
+	return raw, parsed, nil
 }
 
 func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
+	// Writing paths are rate limited too. Only the read paths were, and this
+	// one both stores state and spends a signature.
+	if !s.lim.allow(clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "slow down")
+		return
+	}
 	var req witnessEventRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid body")
@@ -128,29 +157,29 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "aid required")
 		return
 	}
-	rawEvent, event, verifiable, err := req.event()
+	rawEvent, event, err := req.event()
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Where the controller sent the published bytes and a signature, check that
-	// the identity actually authorised this event before attesting to it.
-	//
-	// A witness that will attest to anything it is sent is one anybody can make
-	// say anything, and its receipts stop distinguishing a real history from an
-	// invented one. Where only the parsed form arrived there is nothing to
-	// check, and the receipt says so rather than implying a check happened.
-	if verifiable {
-		if req.CesrSignature == "" {
-			writeErr(w, http.StatusBadRequest,
-				"an event sent as bytes must carry the controller signature over them")
-			return
-		}
-		if err := verifyControllerSignature(rawEvent, event, req.CesrSignature); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	// Nothing is stored or receipted until the identity is shown to have
+	// authorised it. A witness that attests to whatever it is sent is one
+	// anybody can make say anything, and its receipts stop distinguishing a
+	// real history from an invented one — and because a stored event moves the
+	// digest this service reports, an unchecked write is also a way to accuse
+	// an innocent identity of equivocating.
+	if req.CesrSignature == "" {
+		writeErr(w, http.StatusBadRequest,
+			"an event must carry the controller signature over its published bytes")
+		return
+	}
+	// Prior events are read first because a non-establishment event is signed
+	// by the key state they carry, not by anything in the event itself.
+	events, _ := s.Store.GetKELEvents(req.AID)
+	if err := verifyControllerSignature(rawEvent, event, req.CesrSignature, events); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	seq := digest.CurrentSeq([]map[string]interface{}{event})
@@ -159,7 +188,6 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 			seq, _ = strconv.Atoi(v)
 		}
 	}
-	events, _ := s.Store.GetKELEvents(req.AID)
 	events = append(events, event)
 	d, err := digest.KelDigestAtSeq(events, seq)
 	if err != nil {
@@ -268,6 +296,10 @@ func (s *Server) handleKelCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
+	if !s.lim.allow(clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "slow down")
+		return
+	}
 	var req struct {
 		AID           string `json:"aid"`
 		ControllerAID string `json:"controller_aid"`

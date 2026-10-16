@@ -22,8 +22,45 @@ import (
 
 // verifyControllerSignature checks a CESR signature over an event's canonical
 // bytes against the key the event itself declares.
-func verifyControllerSignature(raw []byte, event map[string]interface{}, cesrSig string) error {
-	key, err := signingKeyOf(event)
+// isEstablishment reports whether an event sets the key state rather than
+// inheriting it. Only these carry a `k` field of their own.
+func isEstablishment(event map[string]interface{}) bool {
+	switch t, _ := event["t"].(string); t {
+	case "icp", "rot", "dip", "drt":
+		return true
+	}
+	return false
+}
+
+// signingKeyFor returns the key that must have signed this event.
+//
+// An establishment event declares its own. Anything else — an interaction,
+// which is most of what a live identity emits — is signed by whatever key is
+// currently in force, and the witness already holds that: it is in the most
+// recent establishment event it has stored for this identity.
+//
+// Resolving it that way is what lets every event be checked. The previous code
+// only looked at the event in hand, so signingKeyOf failed on every ixn with
+// "this event declares no key" and the handler refused it outright — meaning
+// nothing could ever be anchored through this witness. The comment above
+// signingKeyOf claimed such events were instead accepted without a check.
+// Neither half was true, and both are now moot: they are checked.
+func signingKeyFor(event map[string]interface{}, prior []map[string]interface{}) (ed25519.PublicKey, error) {
+	if isEstablishment(event) {
+		return signingKeyOf(event)
+	}
+	for i := len(prior) - 1; i >= 0; i-- {
+		if !isEstablishment(prior[i]) {
+			continue
+		}
+		return signingKeyOf(prior[i])
+	}
+	return nil, fmt.Errorf("this event inherits its key from an establishment event, and this " +
+		"witness holds none for that identity — enrol and submit the inception first")
+}
+
+func verifyControllerSignature(raw []byte, event map[string]interface{}, cesrSig string, prior []map[string]interface{}) error {
+	key, err := signingKeyFor(event, prior)
 	if err != nil {
 		return err
 	}

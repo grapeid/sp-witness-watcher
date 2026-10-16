@@ -2,11 +2,14 @@ package api
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/grapeid/sp-witness-watcher/internal/signer"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
@@ -35,16 +38,22 @@ func TestWitnessWatcherFlow(t *testing.T) {
 		t.Fatalf("enroll: %d %s", enrollRec.Code, enrollRec.Body.String())
 	}
 
-	// Witness event seq 0
-	ev := map[string]interface{}{
-		"event": map[string]interface{}{
-			"v": "KERI10JSON000256_", "t": "icp", "d": "EAliceEvent0000000000000000000000000000000x",
-			"i": "EAlice", "s": "0",
-			"k": []string{"Dkey1"},
-		},
-		"aid": "EAlice",
+	// Witness event seq 0.
+	//
+	// Sent as published bytes with the controller's signature over them,
+	// because that is now the only form a witness will receipt. The parsed
+	// form this test used to send was never checked against anything, and
+	// storing an unchecked event moves the digest this service reports.
+	alicePub, alicePriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	evBody, _ := json.Marshal(ev)
+	icpRaw := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EAliceEvent0000000000000000000000000000000x","i":"EAlice","s":"0","k":["` + qb64Key(alicePub) + `"]}`)
+	evBody, _ := json.Marshal(map[string]interface{}{
+		"aid":            "EAlice",
+		"event_b64":      base64.StdEncoding.EncodeToString(icpRaw),
+		"cesr_signature": cesrSig(ed25519.Sign(alicePriv, icpRaw)),
+	})
 	evReq := httptest.NewRequest(http.MethodPost, "/witness/event", bytes.NewReader(evBody))
 	evRec := httptest.NewRecorder()
 	router.ServeHTTP(evRec, evReq)
@@ -52,16 +61,15 @@ func TestWitnessWatcherFlow(t *testing.T) {
 		t.Fatalf("witness event: %d %s", evRec.Code, evRec.Body.String())
 	}
 
-	// Conflicting event at same seq — must reject (C3)
-	ev2 := map[string]interface{}{
-		"event": map[string]interface{}{
-			"v": "KERI10JSON000256_", "t": "icp", "d": "EAliceForked000000000000000000000000000000x",
-			"i": "EAlice", "s": "0",
-			"k": []string{"DkeyFORK"},
-		},
-		"aid": "EAlice",
-	}
-	ev2Body, _ := json.Marshal(ev2)
+	// Conflicting event at the same seq — must reject (C3). Properly signed by
+	// Alice, so what is being tested is the fork detection and not the
+	// signature check that now precedes it.
+	forkRaw := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EAliceForked000000000000000000000000000000x","i":"EAlice","s":"0","k":["` + qb64Key(alicePub) + `"]}`)
+	ev2Body, _ := json.Marshal(map[string]interface{}{
+		"aid":            "EAlice",
+		"event_b64":      base64.StdEncoding.EncodeToString(forkRaw),
+		"cesr_signature": cesrSig(ed25519.Sign(alicePriv, forkRaw)),
+	})
 	ev2Req := httptest.NewRequest(http.MethodPost, "/witness/event", bytes.NewReader(ev2Body))
 	ev2Rec := httptest.NewRecorder()
 	router.ServeHTTP(ev2Rec, ev2Req)
@@ -101,5 +109,58 @@ func TestWitnessWatcherFlow(t *testing.T) {
 	router.ServeHTTP(kelRec, kelReq)
 	if kelRec.Code != http.StatusOK {
 		t.Fatalf("witness kel: %d", kelRec.Code)
+	}
+}
+
+// Health answers on both paths. The agent's heartbeat builds /api/health, and
+// when only /health existed every probe 404'd and counted as a failure.
+func TestHealthAnswersOnBothPaths(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	id, err := signer.LoadOrCreate(filepath.Join(dir, "id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := New(st, id).Router()
+	for _, path := range []string{"/health", "/api/health"} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// Re-enrolling must not move observed_since. It is this service's testimony
+// about how long it has been watching, /enroll takes any AID from anyone, and
+// resetting it discards the window a fork would have shown in.
+func TestReEnrollingDoesNotResetObservedSince(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Enroll("EAlice", "EAlice"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.ObservedSince("EAlice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond) // the column has second resolution
+	if err := st.Enroll("EAlice", "EAlice"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := st.ObservedSince("EAlice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != first {
+		t.Fatalf("observed_since moved on re-enrolment: %q then %q", first, again)
 	}
 }

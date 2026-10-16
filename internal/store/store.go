@@ -82,10 +82,22 @@ CREATE TABLE IF NOT EXISTS digest_conflicts (
 
 func (s *ServiceStore) Enroll(aid, controllerAID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
+	// observed_since is first-wins and is never moved forward.
+	//
+	// It used to be overwritten on conflict, so a second enrolment for an AID
+	// already enrolled reset it to the present. That field is handed back as
+	// part of this service's answer — it is the watcher's testimony about how
+	// long it has been looking, which is most of what the opinion is worth —
+	// and /enroll takes any AID from anyone. So a stranger could take a witness
+	// that had observed an identity for a year and reset it to five seconds
+	// ago, discarding exactly the window in which a fork would have shown.
+	//
+	// Re-enrolling still reactivates a withdrawn enrolment, because that is a
+	// real thing a controller may want. It just cannot rewrite history.
 	_, err := s.db.Exec(`
 		INSERT INTO enrollments (aid, controller_aid, enrolled_at, status, observed_since)
 		VALUES (?, ?, ?, 'active', ?)
-		ON CONFLICT(aid) DO UPDATE SET status='active', observed_since=excluded.observed_since`,
+		ON CONFLICT(aid) DO UPDATE SET status='active'`,
 		aid, controllerAID, now, now)
 	return err
 }
