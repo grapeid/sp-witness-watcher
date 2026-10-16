@@ -163,6 +163,20 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The event must belong to the AID it is being filed under. Without this,
+	// a genuine, correctly-signed event from identity X can be POSTed with
+	// aid set to a victim: the signature verifies (it is real), the event is
+	// stored at the victim's AID, and it moves the digest this service reports
+	// for the victim — so the victim's own real event then collides and the
+	// victim is recorded as equivocating. The signature check alone does not
+	// stop this, because the signature is X's and it is valid; what stops it
+	// is binding the stored AID to the event's own identifier.
+	if i, _ := event["i"].(string); i != req.AID {
+		writeErr(w, http.StatusBadRequest,
+			"the event's identifier does not match the aid it is filed under")
+		return
+	}
+
 	// Nothing is stored or receipted until the identity is shown to have
 	// authorised it. A witness that attests to whatever it is sent is one
 	// anybody can make say anything, and its receipts stop distinguishing a

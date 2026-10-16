@@ -121,3 +121,46 @@ func TestTheParsedOnlyFormIsRefused(t *testing.T) {
 		t.Fatal("an event with no published bytes was accepted")
 	}
 }
+
+// A rotation is refused until pre-rotation commitment checking exists, rather
+// than trusted on the strength of its own declared key. Trusting it would let
+// anyone who can reach the witness rotate anyone's key state.
+func TestARotationIsRefusedUntilItCanBeValidated(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotRaw := []byte(`{"v":"KERI10JSON000160_","t":"rot","d":"EAAArot","i":"EAAAicp","s":"1","k":["` + qb64Key(pub) + `"]}`)
+	var rot map[string]interface{}
+	if err := json.Unmarshal(rotRaw, &rot); err != nil {
+		t.Fatal(err)
+	}
+	// Even signed by the key it declares, it must not be accepted.
+	if err := verifyControllerSignature(rotRaw, rot, cesrSig(ed25519.Sign(priv, rotRaw)), nil); err == nil {
+		t.Fatal("a rotation was attested to without pre-rotation validation")
+	}
+}
+
+// Key state is resolved at the submitted event's sequence, not at the tail, so
+// a backfilled interaction before a (hypothetical) later establishment event
+// is checked against the key that was actually in force when it was signed.
+func TestKeyStateIsResolvedAtTheEventsSequence(t *testing.T) {
+	k0pub, k0priv, _ := ed25519.GenerateKey(nil)
+	k1pub, _, _ := ed25519.GenerateKey(nil)
+
+	var icp, laterEstablishment map[string]interface{}
+	json.Unmarshal([]byte(`{"t":"icp","d":"EAAAicp","i":"EAAAicp","s":"0","k":["`+qb64Key(k0pub)+`"]}`), &icp)
+	// A second establishment event at s=5 under a different key. (This witness
+	// would not actually accept it today — it is a rot — but signingKeyFor must
+	// still resolve correctly around it when it is already on file.)
+	json.Unmarshal([]byte(`{"t":"rot","d":"EAAArot","i":"EAAAicp","s":"5","k":["`+qb64Key(k1pub)+`"]}`), &laterEstablishment)
+	prior := []map[string]interface{}{icp, laterEstablishment}
+
+	// An interaction at s=2 is signed by k0 (in force at s=2), not k1.
+	ixnRaw := []byte(`{"t":"ixn","d":"EAAAixn2","i":"EAAAicp","s":"2"}`)
+	var ixn map[string]interface{}
+	json.Unmarshal(ixnRaw, &ixn)
+	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(ed25519.Sign(k0priv, ixnRaw)), prior); err != nil {
+		t.Fatalf("an interaction at s=2 was not checked against the key in force at s=2: %v", err)
+	}
+}

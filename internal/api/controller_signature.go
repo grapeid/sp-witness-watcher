@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"strconv"
 )
 
 // Checking that a controller authorised the event it is asking to have
@@ -32,31 +33,65 @@ func isEstablishment(event map[string]interface{}) bool {
 	return false
 }
 
-// signingKeyFor returns the key that must have signed this event.
+// eventSeqOf reads the integer sequence number from an event's hex `s` field.
+func eventSeqOf(event map[string]interface{}) (int, bool) {
+	sv, ok := event["s"].(string)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(sv, 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(n), true
+}
+
+// signingKeyFor returns the key that must have signed this event, and refuses
+// rather than guess.
 //
-// An establishment event declares its own. Anything else — an interaction,
-// which is most of what a live identity emits — is signed by whatever key is
-// currently in force, and the witness already holds that: it is in the most
-// recent establishment event it has stored for this identity.
+// An inception (icp) or delegated inception (dip) is self-certifying: the
+// identifier IS the digest of the event, so one cannot be filed under an AID
+// whose controller did not produce it (the handler also checks i == aid), and
+// its own `k` is authoritative.
 //
-// Resolving it that way is what lets every event be checked. The previous code
-// only looked at the event in hand, so signingKeyOf failed on every ixn with
-// "this event declares no key" and the handler refused it outright — meaning
-// nothing could ever be anchored through this witness. The comment above
-// signingKeyOf claimed such events were instead accepted without a check.
-// Neither half was true, and both are now moot: they are checked.
+// Anything that merely inherits key state — an interaction — is signed by the
+// key the newest establishment event IN FORCE AT THIS EVENT'S SEQUENCE put
+// there. Resolving at the tail instead was wrong twice: a backfilled event
+// before a rotation would be checked against the post-rotation key and
+// wrongly refused, and a gap could let the wrong key through.
+//
+// Rotation (rot/drt) is deliberately NOT accepted here. Validating one means
+// checking the new keys against the prior event's pre-rotation commitment (its
+// `n` digests), which is exact-serialisation KERI work this service does not
+// yet do — and trusting a rotation's own declared key without that check lets
+// anyone who can reach the witness rotate anyone's key state, since the rot
+// would verify against the very key the attacker chose. Until that validation
+// exists it fails closed: a witness that cannot yet witness a rotation is a
+// liveness limit; one that lets anyone rotate anyone is a hole.
 func signingKeyFor(event map[string]interface{}, prior []map[string]interface{}) (ed25519.PublicKey, error) {
-	if isEstablishment(event) {
+	switch t, _ := event["t"].(string); t {
+	case "icp", "dip":
 		return signingKeyOf(event)
+	case "rot", "drt":
+		return nil, fmt.Errorf("this witness cannot yet validate a rotation (pre-rotation " +
+			"commitment checking is not implemented), so it will not attest to one")
+	}
+
+	seq, ok := eventSeqOf(event)
+	if !ok {
+		return nil, fmt.Errorf("event has no readable sequence number")
 	}
 	for i := len(prior) - 1; i >= 0; i-- {
-		if !isEstablishment(prior[i]) {
-			continue
+		pseq, ok := eventSeqOf(prior[i])
+		if !ok || pseq >= seq {
+			continue // only key state established strictly before this event counts
 		}
-		return signingKeyOf(prior[i])
+		if isEstablishment(prior[i]) {
+			return signingKeyOf(prior[i])
+		}
 	}
 	return nil, fmt.Errorf("this event inherits its key from an establishment event, and this " +
-		"witness holds none for that identity — enrol and submit the inception first")
+		"witness holds none at an earlier sequence for that identity — submit the inception first")
 }
 
 func verifyControllerSignature(raw []byte, event map[string]interface{}, cesrSig string, prior []map[string]interface{}) error {
