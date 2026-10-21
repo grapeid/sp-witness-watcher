@@ -7,3 +7,8 @@
 *.dylib
 *.test
 *.out
+
+# Agent operating rules, regenerated locally; never committed
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md

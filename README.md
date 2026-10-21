@@ -1,67 +1,105 @@
 # sp-witness-watcher
 
-M67 Commercial Witness + Watcher Service — hosted implementation of M11 witness protocol and M12 watcher protocol.
+A KERI witness and watcher service for Identity Agents.
 
-One codebase, two API surfaces, shared KEL observation store. Grape ID operates a pool of numbered instances (`witness1`–`witness3` / `watcher1`–`watcher3` at `*.grapeid.org`); set `WW_INSTANCE=1|2|3` per deployment (or `WW_WITNESS_PUBLIC_URL` / `WW_WATCHER_PUBLIC_URL`).
+- As a **witness**, it receives an identity's key events, checks that the
+  identity's controller signed each one, stores a replica of the key event log,
+  and returns a signed receipt. Receipts from independent witnesses are what stop
+  an identity from later presenting two different histories.
+- As a **watcher**, it reports a signed digest of the key event log it has
+  observed for an identity, and when it first observed it, and answers peer
+  cross-checks. A relying party compares these against what it has seen itself to
+  detect duplicity.
 
-## APIs
+One build offers both roles; either can be switched off. Grape ID operates
+instances of this implementation, and anyone may run their own. The more
+independent operators there are, the more a witness receipt is worth.
 
-| Method | Path | Role |
-|--------|------|------|
-| `POST` | `/witness/event` | Receipt key event → signed receipt |
-| `GET` | `/witness/kel/{aid}` | Serve KEL replica |
-| `GET` | `/public/kel-digest?aid&seq` | Watcher digest + `observed_since` (signed) |
-| `POST` | `/public/kel-check` | Peer cross-check (L3) |
-| `POST` | `/enroll` | Begin witnessing + watching from enrollment |
-| `GET` | `/health` | Liveness |
+## The protocol it implements
 
-## Run locally
+The Identity Agent side of these roles is the open-source
+[Identity Agent](https://github.com/LF-Decentralized-Trust-labs/identity-bot) core. The protocol is
+described in its architecture decision records:
+
+- **ADR-024 — KERI Network Participation: Witness, Watcher, Relay, did:webs
+  Publisher.** The witness and watcher roles, and the three watcher layers: this
+  service answers the shared-watcher standing digest (`/public/kel-digest`) and
+  peer cross-checks (`/public/kel-check`).
+- **ADR-031 — Who witnesses what.** Why a new identity, and every pairwise
+  identifier, relies on independently operated witnesses such as this one.
+- **ADR-016 — Witness Protocol.** The witness exchange between Identity Agents.
+
+## API
+
+| Method | Path | Role | Purpose |
+|---|---|---|---|
+| `POST` | `/witness/event` | witness | Verify and store a key event, return a signed receipt |
+| `GET` | `/witness/kel/{aid}` | witness | Serve the stored key event log replica |
+| `GET` | `/public/kel-digest?aid=&seq=` | watcher | Signed digest at a sequence number, with `observed_since` |
+| `POST` | `/public/kel-check` | watcher | Peer cross-check: does your digest match mine? |
+| `POST` | `/enroll` | both | Start witnessing and watching an identity; returns where to send events |
+| `GET` | `/health` | — | Liveness |
+
+The witness and watcher routes are also served under `/api` (`/api/witness/...`,
+`/api/public/...`, `/api/health`), which is where an Identity Agent addresses
+them.
+
+`POST /witness/event` requires the event's published bytes (`event_b64`) and the
+controller's signature over them (`cesr_signature`). Nothing is stored or
+receipted unverified. Rotation events are refused until pre-rotation commitments
+are validated. Write and read paths are rate limited per client IP.
+
+## Build and run
+
+Requires Go 1.24 or later.
 
 ```bash
 go run ./cmd/server
-# → http://0.0.0.0:8092
+# listening on http://0.0.0.0:8092
 ```
 
-Environment:
-
-- `WW_DATA_DIR` — SQLite + service identity (default `./data`)
-- `PORT` / `HOST` — bind address
-
-## Test
+Test:
 
 ```bash
-go test ./...
+go build ./... && go vet ./... && go test ./...
 ```
 
-## Docker
+Docker:
 
 ```bash
 docker build -t sp-witness-watcher .
 docker run -p 8092:8092 -v ww-data:/data sp-witness-watcher
 ```
 
-## Topology
+## Configuration
 
-Deploy **~3 independent instances** behind load balancers for the default witness pool (T-142). Each instance holds its own service KERI AID; verifiers cross-check via M12 L2/L3 for plurality.
+| Variable | Default | Meaning |
+|---|---|---|
+| `WW_DATA_DIR` | `./data` (`/data` in the image) | SQLite database and the service identity |
+| `PORT` | `8092` | Listen port |
+| `HOST` | `0.0.0.0` | Listen address |
+| `WW_ROLES` | both | `witness`, `watcher`, or `witness,watcher` |
+| `WW_WITNESS_PUBLIC_URL` | the host the request arrived on | Public base URL of the witness role, returned by `/enroll` |
+| `WW_WATCHER_PUBLIC_URL` | the host the request arrived on | Public base URL of the watcher role, returned by `/enroll` |
 
-## Deploy targets
+## Running it in production
 
-| Target | Path | Runtime |
-|--------|------|---------|
-| Docker / Linux VPS | repo root (`go run ./cmd/server`) | Go + SQLite |
-| Fly.io | `fly.toml`, `fly.witness2.toml`, `fly.witness3.toml` | Go + SQLite on a volume |
+**The service identity is the witness.** On first start the service generates
+an Ed25519 key and writes it to `service_identity.json` in `WW_DATA_DIR`. Every
+receipt it issues is signed by that key. Keep the data directory on durable
+storage and back it up: a witness that comes back with a new identity has
+invalidated every receipt it ever issued.
 
-One app per instance on Fly, because each instance is a separate witness with
-its own AID, and that AID lives on the mounted volume. The instances scale to
-zero when idle and the Fly proxy starts one on the next request, which costs
-about 1.8s cold and returns the same AID it had before.
+**One identity per instance.** Running several instances to give controllers
+several witnesses only works if each has its own data directory, and so its own
+identity. Several processes sharing one identity are one witness, however many
+addresses it answers on.
 
-`WW_ROLES` selects which roles an instance offers (`witness`, `watcher`, or
-both; empty means both), so a deployment can run the two separately without a
-separate build.
+Put the service behind a TLS-terminating proxy. If the proxy rewrites the host,
+or the two roles are served on different hosts, set the two public URL variables.
 
-## Related
+## Licence
 
-- M11 witness protocol — `identity-bot/identity-agent-core`
-- M12 watcher protocol — `identity-bot/identity-agent-core/watcher/`
-- M29 login golden vector — `identity-bot/packages/login-verify/golden_vectors.json`
+Apache License 2.0. See [LICENSE](LICENSE). Contributions require a DCO sign-off;
+see [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately, as
+described in [SECURITY.md](SECURITY.md).
