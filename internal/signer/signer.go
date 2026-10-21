@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 )
 
-// Identity holds the service KERI-style AID and signing keys (OQ-WW1: one AID for both roles).
+// Identity holds the service KERI-style AID and signing keys (one AID serves both roles).
 type Identity struct {
 	AID        string
 	PublicKey  ed25519.PublicKey

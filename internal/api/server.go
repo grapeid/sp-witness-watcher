@@ -336,11 +336,11 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]interface{}{
 		"enrolled": true, "aid": req.AID,
-		"watcher_hint_url": watcherKelDigestURL(),
-		"witness_url":      witnessEventURL(),
+		"watcher_hint_url": watcherKelDigestURL(r),
+		"witness_url":      witnessEventURL(r),
 		"observed_since":   time.Now().UTC().Format(time.RFC3339),
 	})
-	log.Printf("[M67] enrolled aid=%s controller=%s", req.AID, controller)
+	log.Printf("[enroll] enrolled aid=%s controller=%s", req.AID, controller)
 }
 
 func jsonOK(w http.ResponseWriter, v interface{}) {
