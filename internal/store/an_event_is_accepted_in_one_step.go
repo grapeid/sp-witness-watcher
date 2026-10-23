@@ -83,7 +83,7 @@ func (s *ServiceStore) AcceptEvent(aid string, seq int, event map[string]interfa
 		}
 		all := append(held, event)
 		b, _ := json.Marshal(event)
-		now := time.Now().UTC().Format(time.RFC3339)
+		now := Now().UTC().Format(time.RFC3339)
 		d, err := digest.KelDigestAtSeq(all, seq)
 		if err != nil {
 			return err

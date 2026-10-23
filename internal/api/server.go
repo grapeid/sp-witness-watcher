@@ -221,10 +221,13 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errNextDisagrees) {
 			s.Store.RecordConflict(req.AID, seqOrMinus(event), "held-after-names-another", eventSAIDOf(event))
 		}
-		// Established: history held here beyond its inception. Enrolment is
-		// not counted, since anybody may enrol any identity.
+		established, serr := s.Store.Established(req.AID)
+		if serr != nil {
+			writeErr(w, http.StatusInternalServerError, serr.Error())
+			return
+		}
 		if eerr := s.Store.EscrowEvent(req.AID, seqOrMinus(event), eventSAIDOf(event),
-			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature, clientIP(r), len(events) > 1); eerr != nil {
+			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature, senderOf(clientIP(r)), established); eerr != nil {
 			writeErr(w, http.StatusTooManyRequests, eerr.Error())
 			return
 		}
@@ -476,6 +479,17 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// senderOf groups an address with the others one sender is likely to hold:
+// an IPv6 address by its /64, which one host or network is usually given
+// whole; an IPv4 address alone.
+func senderOf(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() != nil {
+		return ip
+	}
+	return (&net.IPNet{IP: parsed.Mask(net.CIDRMask(64, 128)), Mask: net.CIDRMask(64, 128)}).String()
 }
 
 func seqOrMinus(event map[string]interface{}) int {

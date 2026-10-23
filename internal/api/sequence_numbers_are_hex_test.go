@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/grapeid/sp-witness-watcher/internal/signer"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
@@ -364,23 +365,31 @@ func TestFreshIdentitiesCannotCrowdOutAnEstablishedOne(t *testing.T) {
 	store.EscrowTotalLimit, store.EscrowReserved = 30, 10
 	t.Cleanup(func() { store.EscrowTotalLimit, store.EscrowReserved = total, reserved })
 	router, _ := hexWorld(t)
+	// Alice's history here is two days old.
+	store.Now = func() time.Time { return time.Now().Add(-48 * time.Hour) }
 	alice := newController(t)
 	postEventFrom(t, router, "10.1.0.1", alice.aid, alice.log[0], alice.priv)
 	postEventFrom(t, router, "10.1.0.1", alice.aid, alice.interact(t), alice.priv)
+	store.Now = time.Now
 	refused := 0
-	for i := 0; i < 30; i++ {
+	// Forty addresses, each with a fresh identity holding one interaction
+	// beyond its inception: none of them established.
+	for i := 0; i < 40; i++ {
 		ip := fmt.Sprintf("10.2.%d.%d", i/200, i%200+1)
 		c := newController(t)
 		if rec := postEventFrom(t, router, ip, c.aid, c.log[0], c.priv); rec.Code != http.StatusOK {
 			t.Fatalf("inception: %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := postEventFrom(t, router, ip, c.aid, c.interact(t), c.priv); rec.Code != http.StatusOK {
+			t.Fatalf("interaction: %d %s", rec.Code, rec.Body.String())
 		}
 		c.interact(t)
 		if rec := postEventFrom(t, router, ip, c.aid, c.interact(t), c.priv); rec.Code == http.StatusTooManyRequests {
 			refused++
 		}
 	}
-	if refused != 10 {
-		t.Fatalf("%d fresh identities were refused, where the reserve is 10", refused)
+	if refused != 20 {
+		t.Fatalf("%d of 40 fresh identities were refused, where 20 fit outside the reserve", refused)
 	}
 	alice.interact(t)
 	alice.interact(t)
@@ -410,5 +419,18 @@ func TestAWitnessHandsBackAnEvent(t *testing.T) {
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+c.aid+"/event/5", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("an event not held was answered %d", rec.Code)
+	}
+}
+
+// IPv6 senders are grouped by their /64 for the per-sender cap.
+func TestAnIPv6SenderIsItsSlash64(t *testing.T) {
+	if senderOf("2001:db8:1:2:aaaa::1") != senderOf("2001:db8:1:2:bbbb::9") {
+		t.Fatal("two addresses in one /64 count as two senders")
+	}
+	if senderOf("2001:db8:1:2::1") == senderOf("2001:db8:1:3::1") {
+		t.Fatal("two /64s count as one sender")
+	}
+	if senderOf("10.0.0.1") == senderOf("10.0.0.2") {
+		t.Fatal("two IPv4 addresses count as one sender")
 	}
 }

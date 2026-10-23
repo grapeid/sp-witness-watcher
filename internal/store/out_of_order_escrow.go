@@ -20,7 +20,26 @@ var (
 	EscrowReserved   = 2000
 	EscrowPerSender  = 256
 	EscrowLife       = 24 * time.Hour
+	// EstablishedAfter is how long an identity's history beyond its
+	// inception must have been held here before it counts as established:
+	// long enough that identities made for the purpose cannot be readied in
+	// time to fill the reserve.
+	EstablishedAfter = 24 * time.Hour
 )
+
+// Now is the store's clock.
+var Now = time.Now
+
+// Established reports whether aid has history held here beyond its
+// inception, received at least EstablishedAfter ago. Enrolment does not
+// count, since anybody may enrol any identity, and this witness has no other
+// agreement to witness one.
+func (s *ServiceStore) Established(aid string) (bool, error) {
+	cutoff := Now().UTC().Add(-EstablishedAfter).Format(time.RFC3339)
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM kel_events WHERE aid=? AND sequence_num >= 1 AND received_at <= ?`, aid, cutoff).Scan(&n)
+	return n > 0, err
+}
 
 // ErrEscrowFull is an identity with as many events held back as it may have.
 var ErrEscrowFull = errors.New("too many of this identity's events are waiting for the ones before them")
