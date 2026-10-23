@@ -186,4 +186,9 @@ func TestFillingAHoleMovesTheTipAndTheLaterDigests(t *testing.T) {
 	if after == before || after != want || stored != want {
 		t.Fatal("the rolling digest after the filled place was not recomputed")
 	}
+	var recorded int
+	st.db.QueryRow(`SELECT COUNT(*) FROM sequence_repairs WHERE aid='EAid' AND kind='digest-recomputed' AND seq_before=3 AND digest_before=? AND digest_after=?`, before, after).Scan(&recorded)
+	if recorded != 1 {
+		t.Fatal("the published digest was overwritten without a record of what it was")
+	}
 }

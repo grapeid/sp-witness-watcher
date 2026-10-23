@@ -5,10 +5,11 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
+	keri "github.com/grapeid/keri-go"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/grapeid/sp-witness-watcher/internal/signer"
@@ -41,44 +42,6 @@ func postEvent(t *testing.T, router http.Handler, aid string, raw []byte, priv e
 	return rec
 }
 
-// A key event's sequence number is hexadecimal. A key log past its tenth and
-// sixteenth events is witnessed in order, each at its own place: read as
-// decimal, event "a" became 0 and was refused as a conflicting inception.
-func TestAKeyLogPastItsSixteenthEventIsWitnessed(t *testing.T) {
-	router, id := hexWorld(t)
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	aid := "EHexAlice"
-	icp := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EHexEvent00","i":"` + aid + `","s":"0","k":["` + qb64Key(pub) + `"]}`)
-	if rec := postEvent(t, router, aid, icp, priv); rec.Code != http.StatusOK {
-		t.Fatalf("inception: %d %s", rec.Code, rec.Body.String())
-	}
-	last := ""
-	for sn := 1; sn <= 17; sn++ {
-		last = fmt.Sprintf("EHexEvent%02x", sn)
-		ixn := []byte(fmt.Sprintf(`{"v":"KERI10JSON000100_","t":"ixn","d":"%s","i":"%s","s":"%x","a":[]}`, last, aid, sn))
-		if rec := postEvent(t, router, aid, ixn, priv); rec.Code != http.StatusOK {
-			t.Fatalf("event %x was refused: %d %s", sn, rec.Code, rec.Body.String())
-		}
-	}
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+aid+"/tip?nonce=n-1", nil))
-	var tip struct {
-		AID, Nonce, SAID, Signature string
-		SN                          int
-		WitnessAID                  string `json:"witness_aid"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &tip); err != nil || rec.Code != http.StatusOK {
-		t.Fatalf("tip: %d %s", rec.Code, rec.Body.String())
-	}
-	if tip.SN != 17 || tip.SAID != last || tip.Nonce != "n-1" || tip.WitnessAID != id.AID {
-		t.Fatalf("the witness says it holds %+v", tip)
-	}
-	sig, err := base64.RawURLEncoding.DecodeString("AA" + tip.Signature[2:])
-	if err != nil || !ed25519.Verify(id.PublicKey, []byte(tipStatement(aid, "n-1", 17, last)), sig[2:]) {
-		t.Fatal("the tip is not signed by the witness over what it says")
-	}
-}
-
 // The tip of a key log this witness holds nothing of is -1, still signed, and
 // a tip asked for without a nonce is refused.
 func TestATipIsAskedForWithANonce(t *testing.T) {
@@ -108,14 +71,47 @@ func TestTheTipStatementMatchesTheCore(t *testing.T) {
 	}
 }
 
+// A key event's sequence number is hexadecimal. A real key log past its tenth
+// and sixteenth events is witnessed in order, each at its own place: read as
+// decimal, event "a" became 0 and was refused as a conflicting inception.
+func TestAKeyLogPastItsSixteenthEventIsWitnessed(t *testing.T) {
+	router, id := hexWorld(t)
+	c := newController(t)
+	if rec := postEvent(t, router, c.aid, c.log[0], c.priv); rec.Code != http.StatusOK {
+		t.Fatalf("inception: %d %s", rec.Code, rec.Body.String())
+	}
+	for sn := 1; sn <= 17; sn++ {
+		if rec := postEvent(t, router, c.aid, c.interact(t), c.priv); rec.Code != http.StatusOK {
+			t.Fatalf("event %x was refused: %d %s", sn, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+c.aid+"/tip?nonce=n-1", nil))
+	var tip struct {
+		AID, Nonce, SAID, Signature string
+		SN                          int
+		WitnessAID                  string `json:"witness_aid"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tip); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("tip: %d %s", rec.Code, rec.Body.String())
+	}
+	last := c.said[len(c.said)-1]
+	if tip.SN != 17 || tip.SAID != last || tip.Nonce != "n-1" || tip.WitnessAID != id.AID {
+		t.Fatalf("the witness says it holds %+v", tip)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString("AA" + tip.Signature[2:])
+	if err != nil || !ed25519.Verify(id.PublicKey, []byte(tipStatement(c.aid, "n-1", 17, last)), sig[2:]) {
+		t.Fatal("the tip is not signed by the witness over what it says")
+	}
+}
+
 // The same event sent again is answered with its receipt, not a conflict, so
 // a controller sending from where it thinks the witness stopped carries on.
 func TestTheSameEventAgainIsReceipted(t *testing.T) {
 	router, _ := hexWorld(t)
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	icp := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EAgain0","i":"EAgain","s":"0","k":["` + qb64Key(pub) + `"]}`)
-	first := postEvent(t, router, "EAgain", icp, priv)
-	again := postEvent(t, router, "EAgain", icp, priv)
+	c := newController(t)
+	first := postEvent(t, router, c.aid, c.log[0], c.priv)
+	again := postEvent(t, router, c.aid, c.log[0], c.priv)
 	if first.Code != http.StatusOK || again.Code != http.StatusOK {
 		t.Fatalf("the same event again: %d then %d %s", first.Code, again.Code, again.Body.String())
 	}
@@ -127,27 +123,48 @@ func TestTheSameEventAgainIsReceipted(t *testing.T) {
 	}
 }
 
-// The tip a witness signs is the highest place with nothing missing below.
-func TestTheTipStopsAtAPlaceLeftEmpty(t *testing.T) {
+// An event that does not follow the one held before it is refused: out of
+// order, or naming another prior.
+func TestAnEventOutOfOrderIsRefused(t *testing.T) {
 	router, _ := hexWorld(t)
+	c := newController(t)
+	postEvent(t, router, c.aid, c.log[0], c.priv)
+	first := c.interact(t)
+	second := c.interact(t)
+	if rec := postEvent(t, router, c.aid, second, c.priv); rec.Code != http.StatusBadRequest {
+		t.Fatalf("an event with the one before it missing was answered %d", rec.Code)
+	}
+	if rec := postEvent(t, router, c.aid, first, c.priv); rec.Code != http.StatusOK {
+		t.Fatalf("the next event: %d %s", rec.Code, rec.Body.String())
+	}
+	other := newController(t)
+	stray, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: c.aid, PriorSAID: other.said[0], SN: 2,
+		Data: []json.RawMessage{json.RawMessage(`{"d":"` + other.said[0] + `"}`)}})
+	if rec := postEvent(t, router, c.aid, stray, c.priv); rec.Code != http.StatusBadRequest {
+		t.Fatalf("an event naming another prior was answered %d", rec.Code)
+	}
+}
+
+// The attack this witness now refuses: an inception for an identifier nobody
+// has sent yet, whose identifier is not derived from it, or whose contents do
+// not digest to what it claims. Either would pre-empt the real identity.
+func TestAForgedInceptionIsRefused(t *testing.T) {
+	router, _ := hexWorld(t)
+	real := newController(t)
+	attacker := newController(t)
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	aid := "EHoled"
-	icp := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EHoled0","i":"` + aid + `","s":"0","k":["` + qb64Key(pub) + `"]}`)
-	postEvent(t, router, aid, icp, priv)
-	for _, sn := range []int{1, 3} {
-		ixn := []byte(fmt.Sprintf(`{"v":"KERI10JSON000100_","t":"ixn","d":"EHoled%x","i":"%s","s":"%x","a":[]}`, sn, aid, sn))
-		if rec := postEvent(t, router, aid, ixn, priv); rec.Code != http.StatusOK {
-			t.Fatalf("event %d: %d %s", sn, rec.Code, rec.Body.String())
-		}
+	// The attacker's own, valid, inception, filed under the real identifier
+	// with the identifier rewritten to match.
+	forged := []byte(strings.Replace(string(attacker.log[0]), attacker.aid, real.aid, -1))
+	if rec := postEvent(t, router, real.aid, forged, attacker.priv); rec.Code != http.StatusBadRequest {
+		t.Fatalf("an inception whose identifier is not derived from it was answered %d", rec.Code)
 	}
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+aid+"/tip?nonce=n", nil))
-	var tip struct {
-		SN   int    `json:"sn"`
-		SAID string `json:"said"`
+	// A hand-made inception with a claimed digest.
+	made := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"` + real.aid + `","i":"` + real.aid + `","s":"0","k":["` + qb64Key(pub) + `"]}`)
+	if rec := postEvent(t, router, real.aid, made, priv); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a hand-made inception was answered %d", rec.Code)
 	}
-	json.Unmarshal(rec.Body.Bytes(), &tip)
-	if tip.SN != 1 || tip.SAID != "EHoled1" {
-		t.Fatalf("with place 2 empty the tip reads %+v", tip)
+	if rec := postEvent(t, router, real.aid, real.log[0], real.priv); rec.Code != http.StatusOK {
+		t.Fatalf("the real inception, after the forgeries: %d %s", rec.Code, rec.Body.String())
 	}
 }

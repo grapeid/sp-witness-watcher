@@ -107,6 +107,17 @@ func (s *ServiceStore) AcceptEvent(aid string, seq int, event map[string]interfa
 			if err != nil {
 				return err
 			}
+			// A published digest is not overwritten unrecorded: what it was,
+			// what it becomes, and the row as it stood are kept first.
+			var oldDigest, observedAt string
+			_ = c.QueryRowContext(ctx, `SELECT kel_digest, observed_at FROM observations WHERE aid=? AND sequence_num=?`, aid, later).Scan(&oldDigest, &observedAt)
+			if oldDigest != ld {
+				row, _ := json.Marshal(map[string]interface{}{"sequence_num": later, "kel_digest": oldDigest, "observed_at": observedAt})
+				if _, err := c.ExecContext(ctx, `INSERT INTO sequence_repairs (aid, kind, seq_before, seq_after, digest_before, digest_after, row_before, repaired_at) VALUES (?,?,?,?,?,?,?,?)`,
+					aid, "digest-recomputed", later, later, oldDigest, ld, string(row), now); err != nil {
+					return err
+				}
+			}
 			if _, err := c.ExecContext(ctx, `UPDATE kel_events SET event_digest=? WHERE aid=? AND sequence_num=?`, ld, aid, later); err != nil {
 				return err
 			}

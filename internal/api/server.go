@@ -189,9 +189,19 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 			"an event must carry the controller signature over its published bytes")
 		return
 	}
+	// The event must be what it says it is before anything else is believed:
+	// its contents digest to the identifier it claims, an inception derives
+	// the identity's identifier from itself, and any later event names, as
+	// its prior, the event this witness holds one place before it. Without
+	// this anybody could plant an inception, under an identifier no witness
+	// holds yet, that its real controller never made.
+	events, _ := s.Store.GetKELEvents(req.AID)
+	if err := eventBelongsHere(rawEvent, events); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// Prior events are read first because a non-establishment event is signed
 	// by the key state they carry, not by anything in the event itself.
-	events, _ := s.Store.GetKELEvents(req.AID)
 	if err := verifyControllerSignature(rawEvent, event, req.CesrSignature, events); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
