@@ -91,11 +91,13 @@ type storedEvent struct {
 	raw        string
 	digest     string
 	receivedAt string
+	// rawB64 and sig are the event as published and signed, kept as they are.
+	rawB64, sig string
 }
 
 func sequenceRepairOf(ctx context.Context, c *sql.Conn, aid string) (SequenceRepair, []storedEvent, error) {
 	r := SequenceRepair{AID: aid}
-	rows, err := c.QueryContext(ctx, `SELECT sequence_num, event_json, event_digest, received_at FROM kel_events WHERE aid=? ORDER BY sequence_num`, aid)
+	rows, err := c.QueryContext(ctx, `SELECT sequence_num, event_json, event_digest, received_at, raw_b64, cesr_signature FROM kel_events WHERE aid=? ORDER BY sequence_num`, aid)
 	if err != nil {
 		return r, nil, err
 	}
@@ -104,7 +106,7 @@ func sequenceRepairOf(ctx context.Context, c *sql.Conn, aid string) (SequenceRep
 	max := -1
 	for rows.Next() {
 		var e storedEvent
-		if err := rows.Scan(&e.stored, &e.raw, &e.digest, &e.receivedAt); err != nil {
+		if err := rows.Scan(&e.stored, &e.raw, &e.digest, &e.receivedAt, &e.rawB64, &e.sig); err != nil {
 			rows.Close()
 			return r, nil, err
 		}
@@ -180,8 +182,8 @@ func renumber(ctx context.Context, c *sql.Conn, aid string, events []storedEvent
 		if err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx, `INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at) VALUES (?,?,?,?,?)`,
-			aid, sn, e.raw, d, e.receivedAt); err != nil {
+		if _, err := c.ExecContext(ctx, `INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at, raw_b64, cesr_signature) VALUES (?,?,?,?,?,?,?)`,
+			aid, sn, e.raw, d, e.receivedAt, e.rawB64, e.sig); err != nil {
 			return err
 		}
 		row, _ := json.Marshal(map[string]interface{}{"sequence_num": e.stored, "event_json": e.raw, "event_digest": e.digest, "received_at": e.receivedAt})

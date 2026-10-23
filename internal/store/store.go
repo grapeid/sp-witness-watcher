@@ -109,7 +109,58 @@ CREATE TABLE IF NOT EXISTS digest_conflicts (
     detected_at TEXT NOT NULL
 );
 `)
+	if err != nil {
+		return err
+	}
+	// Each event as its controller published and signed it, so it can be
+	// handed back exactly (GET /witness/kel/{aid}/event/{sn}); and who sent
+	// each event held back, so one sender cannot fill the escrow.
+	for _, col := range []struct{ table, name string }{
+		{"kel_events", "raw_b64"}, {"kel_events", "cesr_signature"}, {"escrowed_events", "client_ip"},
+	} {
+		if err := s.addColumn(col.table, col.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addColumn adds a text column to a table that lacks it.
+func (s *ServiceStore) addColumn(table, name string) error {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var have string
+		if err := rows.Scan(&have); err != nil {
+			return err
+		}
+		if have == name {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+// EventAt is the event held at sn of aid's log as its controller published
+// and signed it; ok is false when none is held there, or it was held before
+// witnesses kept the bytes.
+func (s *ServiceStore) EventAt(aid string, sn int) (rawB64, sig string, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT raw_b64, cesr_signature FROM kel_events WHERE aid=? AND sequence_num=?`, aid, sn).Scan(&rawB64, &sig)
+	if err == sql.ErrNoRows {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return rawB64, sig, rawB64 != "" && sig != "", nil
 }
 
 func (s *ServiceStore) Enroll(aid, controllerAID string) error {

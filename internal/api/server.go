@@ -52,6 +52,7 @@ func (s *Server) Router() chi.Router {
 		r.Post("/event", s.handleWitnessEvent)
 		r.Get("/kel/{aid}", s.handleWitnessKel)
 		r.Get("/kel/{aid}/tip", s.handleWitnessKelTip)
+		r.Get("/kel/{aid}/event/{sn}", s.handleWitnessKelEvent)
 	}
 	if roles.Witness {
 		r.Route("/witness", witnessRoutes)
@@ -220,8 +221,10 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errNextDisagrees) {
 			s.Store.RecordConflict(req.AID, seqOrMinus(event), "held-after-names-another", eventSAIDOf(event))
 		}
+		// Established: history held here beyond its inception. Enrolment is
+		// not counted, since anybody may enrol any identity.
 		if eerr := s.Store.EscrowEvent(req.AID, seqOrMinus(event), eventSAIDOf(event),
-			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature); eerr != nil {
+			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature, clientIP(r), len(events) > 1); eerr != nil {
 			writeErr(w, http.StatusTooManyRequests, eerr.Error())
 			return
 		}
@@ -246,7 +249,7 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 	// An event already held at its place is answered with its receipt, as
 	// though it had just arrived, so a controller sending from where it thinks
 	// this witness stopped carries on. Something else there is a conflict.
-	d, _, err := s.Store.AcceptEvent(req.AID, seq, event)
+	d, _, err := s.Store.AcceptEvent(req.AID, seq, event, base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature)
 	if errors.Is(err, store.ErrConflict) {
 		writeErr(w, http.StatusConflict, err.Error())
 		return
@@ -520,7 +523,7 @@ func (s *Server) promoteEscrowed(aid string, seq int) {
 				s.Store.DropEscrowed(aid, e.SAID)
 				continue
 			}
-			if _, _, err := s.Store.AcceptEvent(aid, next, event); err != nil {
+			if _, _, err := s.Store.AcceptEvent(aid, next, event, e.RawB64, e.Signature); err != nil {
 				continue
 			}
 			s.Store.DropEscrowed(aid, e.SAID)
@@ -531,4 +534,30 @@ func (s *Server) promoteEscrowed(aid string, seq int) {
 			return
 		}
 	}
+}
+
+// handleWitnessKelEvent hands back one event of an identity's log as its
+// controller published and signed it: how an Identity Agent finds an event
+// the device holding the identity's key signed, when the reply did not reach
+// it.
+func (s *Server) handleWitnessKelEvent(w http.ResponseWriter, r *http.Request) {
+	if !s.lim.allow(clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
+	sn, err := strconv.Atoi(chi.URLParam(r, "sn"))
+	if err != nil || sn < 0 {
+		writeErr(w, http.StatusBadRequest, "a place in the log is a number")
+		return
+	}
+	raw, sig, ok, err := s.Store.EventAt(chi.URLParam(r, "aid"), sn)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "no event is held there as it was published")
+		return
+	}
+	jsonOK(w, map[string]string{"raw_bytes_b64": raw, "cesr_signature": sig})
 }

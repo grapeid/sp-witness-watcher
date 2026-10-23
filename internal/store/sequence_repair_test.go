@@ -23,8 +23,8 @@ func TestEventsStoredAtTheWrongPlaceAreRepaired(t *testing.T) {
 		if s == "0" {
 			ev = fmt.Sprintf(`{"t":"icp","d":"E0","i":"%s","s":"0"}`, aid)
 		}
-		if _, err := st.db.Exec(`INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at) VALUES (?,?,?,?,?)`,
-			aid, stored, ev, "Ewrong", "2026-01-01T00:00:00Z"); err != nil {
+		if _, err := st.db.Exec(`INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at, raw_b64, cesr_signature) VALUES (?,?,?,?,?,?,?)`,
+			aid, stored, ev, "Ewrong", "2026-01-01T00:00:00Z", "cmF3"+s, "sig"+s); err != nil {
 			t.Fatal(err)
 		}
 		st.db.Exec(`INSERT INTO observations (aid, sequence_num, kel_digest, observed_at) VALUES (?,?,?,?)`, aid, stored, "Ewrong", fmt.Sprintf("2026-01-01T00:00:%02dZ", stored))
@@ -55,6 +55,10 @@ func TestEventsStoredAtTheWrongPlaceAreRepaired(t *testing.T) {
 	events, _ := st.GetKELEvents(aid)
 	if len(events) != 12 || events[len(events)-1]["s"] != "11" {
 		t.Fatalf("after repair the log is %v", events)
+	}
+	// Each event keeps the bytes and signature it was published with.
+	if raw, sig, ok, _ := st.EventAt(aid, 17); !ok || raw != "cmF311" || sig != "sig11" {
+		t.Fatalf("the event moved to 17 lost what it was published as: %q %q", raw, sig)
 	}
 	var at17 string
 	if err := st.db.QueryRow(`SELECT sequence_num FROM kel_events WHERE aid=? AND event_json LIKE '%"s":"11"%'`, aid).Scan(&at17); err != nil || at17 != "17" {
@@ -104,7 +108,7 @@ func TestAWriteDuringARepairIsKept(t *testing.T) {
 	go func() {
 		for i := 0; i < 20; i++ {
 			ev := map[string]interface{}{"t": "ixn", "d": fmt.Sprintf("EOther%d", i), "i": "EOther", "s": fmt.Sprintf("%x", i)}
-			if _, _, err := st.AcceptEvent("EOther", i, ev); err != nil {
+			if _, _, err := st.AcceptEvent("EOther", i, ev, "", ""); err != nil {
 				done <- err
 				return
 			}
@@ -133,11 +137,11 @@ func TestTheSameEventAgainIsNoConflict(t *testing.T) {
 	st, _ := Open(t.TempDir())
 	defer st.Close()
 	ev := map[string]interface{}{"t": "icp", "d": "E0", "i": "EAid", "s": "0"}
-	d1, dup1, err := st.AcceptEvent("EAid", 0, ev)
+	d1, dup1, err := st.AcceptEvent("EAid", 0, ev, "", "")
 	if err != nil || dup1 {
 		t.Fatal(err)
 	}
-	d2, dup2, err := st.AcceptEvent("EAid", 0, ev)
+	d2, dup2, err := st.AcceptEvent("EAid", 0, ev, "", "")
 	if err != nil || !dup2 || d2 != d1 {
 		t.Fatalf("the same event again: %v %v %v", err, dup2, d2 == d1)
 	}
@@ -147,7 +151,7 @@ func TestTheSameEventAgainIsNoConflict(t *testing.T) {
 		t.Fatal("the same event again wrote a conflict")
 	}
 	other := map[string]interface{}{"t": "icp", "d": "E0other", "i": "EAid", "s": "0"}
-	if _, _, err := st.AcceptEvent("EAid", 0, other); err == nil {
+	if _, _, err := st.AcceptEvent("EAid", 0, other, "", ""); err == nil {
 		t.Fatal("a different event at a held place was accepted")
 	}
 	st.db.QueryRow(`SELECT COUNT(*) FROM digest_conflicts`).Scan(&conflicts)
@@ -165,7 +169,7 @@ func TestFillingAHoleMovesTheTipAndTheLaterDigests(t *testing.T) {
 		return map[string]interface{}{"t": "ixn", "d": fmt.Sprintf("E%x", sn), "i": "EAid", "s": fmt.Sprintf("%x", sn)}
 	}
 	for _, sn := range []int{0, 1, 3} {
-		if _, _, err := st.AcceptEvent("EAid", sn, ev(sn)); err != nil {
+		if _, _, err := st.AcceptEvent("EAid", sn, ev(sn), "", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -173,7 +177,7 @@ func TestFillingAHoleMovesTheTipAndTheLaterDigests(t *testing.T) {
 		t.Fatalf("with place 2 empty the tip is %d %s", tip, said)
 	}
 	before, _, _ := st.GetObservationDigest("EAid", 3)
-	if _, _, err := st.AcceptEvent("EAid", 2, ev(2)); err != nil {
+	if _, _, err := st.AcceptEvent("EAid", 2, ev(2), "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if tip, _, _ := st.UnbrokenTip("EAid"); tip != 3 {
@@ -199,18 +203,18 @@ func TestTheEscrowIsBoundedAndExpires(t *testing.T) {
 	st, _ := Open(t.TempDir())
 	defer st.Close()
 	for i := 0; i < EscrowLimit; i++ {
-		if err := st.EscrowEvent("EAid", 10+i, fmt.Sprintf("E%d", i), "cmF3", "sig"); err != nil {
+		if err := st.EscrowEvent("EAid", 10+i, fmt.Sprintf("E%d", i), "cmF3", "sig", "", false); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := st.EscrowEvent("EAid", 999, "Emore", "cmF3", "sig"); err != ErrEscrowFull {
+	if err := st.EscrowEvent("EAid", 999, "Emore", "cmF3", "sig", "", false); err != ErrEscrowFull {
 		t.Fatalf("past the bound: %v", err)
 	}
-	if err := st.EscrowEvent("EOther", 5, "Eother", "cmF3", "sig"); err != nil {
+	if err := st.EscrowEvent("EOther", 5, "Eother", "cmF3", "sig", "", false); err != nil {
 		t.Fatalf("another identity is bounded on its own: %v", err)
 	}
 	st.db.Exec(`UPDATE escrowed_events SET received_at = ? WHERE aid = 'EAid'`, time.Now().UTC().Add(-2*EscrowLife).Format(time.RFC3339))
-	if err := st.EscrowEvent("EAid", 999, "Emore", "cmF3", "sig"); err != nil {
+	if err := st.EscrowEvent("EAid", 999, "Emore", "cmF3", "sig", "", false); err != nil {
 		t.Fatalf("after the held back events expired: %v", err)
 	}
 	if got, _ := st.EscrowedAt("EAid", 10); len(got) != 0 {
@@ -224,7 +228,7 @@ func TestTheTipIsKeptNotReadFromTheLog(t *testing.T) {
 	defer st.Close()
 	for sn := 0; sn <= 3; sn++ {
 		ev := map[string]interface{}{"t": "ixn", "d": fmt.Sprintf("E%x", sn), "i": "EAid", "s": fmt.Sprintf("%x", sn)}
-		if _, _, err := st.AcceptEvent("EAid", sn, ev); err != nil {
+		if _, _, err := st.AcceptEvent("EAid", sn, ev, "", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -244,7 +248,66 @@ func TestTheEscrowIsCappedOverall(t *testing.T) {
 		st.db.Exec(`INSERT INTO escrowed_events (aid, sequence_num, said, raw_b64, cesr_signature, received_at) VALUES (?,?,?,?,?,?)`,
 			fmt.Sprintf("E%d", i), 1, fmt.Sprintf("S%d", i), "cmF3", "sig", time.Now().UTC().Format(time.RFC3339))
 	}
-	if err := st.EscrowEvent("ENew", 3, "Enew", "cmF3", "sig"); err != ErrEscrowFull {
+	if err := st.EscrowEvent("ENew", 3, "Enew", "cmF3", "sig", "", false); err != ErrEscrowFull {
 		t.Fatalf("past the overall cap: %v", err)
+	}
+}
+
+// The last EscrowReserved places are kept for identities with history here
+// beyond their inception.
+func TestEscrowRoomIsKeptForEstablishedIdentities(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	for i := 0; i < EscrowTotalLimit-EscrowReserved; i++ {
+		st.db.Exec(`INSERT INTO escrowed_events (aid, sequence_num, said, raw_b64, cesr_signature, received_at) VALUES (?,?,?,?,?,?)`,
+			fmt.Sprintf("E%d", i), 1, fmt.Sprintf("S%d", i), "cmF3", "sig", time.Now().UTC().Format(time.RFC3339))
+	}
+	if err := st.EscrowEvent("EFresh", 3, "Efresh", "cmF3", "sig", "", false); err != ErrEscrowFull {
+		t.Fatalf("a fresh identity took reserved room: %v", err)
+	}
+	if err := st.EscrowEvent("EEstablished", 3, "Eest", "cmF3", "sig", "", true); err != nil {
+		t.Fatalf("an established identity found no room: %v", err)
+	}
+}
+
+// One sender may have only EscrowPerSender events held back at once.
+func TestOneSenderCannotFillTheEscrow(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	for i := 0; i < EscrowPerSender; i++ {
+		if err := st.EscrowEvent(fmt.Sprintf("E%d", i), 3, fmt.Sprintf("S%d", i), "cmF3", "sig", "10.0.0.1", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.EscrowEvent("EOne", 3, "Eone", "cmF3", "sig", "10.0.0.1", false); err != ErrEscrowFull {
+		t.Fatalf("past the sender's cap: %v", err)
+	}
+	if err := st.EscrowEvent("ETwo", 3, "Etwo", "cmF3", "sig", "10.0.0.2", false); err != nil {
+		t.Fatalf("another sender: %v", err)
+	}
+}
+
+// A tip asked for an identity nothing is held of is answered -1 and writes
+// nothing.
+func TestATipForAnUnknownIdentityWritesNothing(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	if sn, said, err := st.UnbrokenTip("ENobody"); sn != -1 || said != "" || err != nil {
+		t.Fatalf("%d %q %v", sn, said, err)
+	}
+	var n int
+	st.db.QueryRow(`SELECT COUNT(*) FROM unbroken_tips`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d tips written for an identity nothing is held of", n)
+	}
+}
+
+// An event held whose place cannot be read is reported, not read as place 0.
+func TestATipOverAnUnreadablePlaceIsAnError(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	st.db.Exec(`INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at) VALUES ('EAid', 0, '{"d":"E0","s":"zz"}', 'x', 'now')`)
+	if _, _, err := st.UnbrokenTip("EAid"); err == nil {
+		t.Fatal("a tip was worked out over an event with no readable place")
 	}
 }

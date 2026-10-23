@@ -245,7 +245,7 @@ func TestFillingAGapMustAgreeWithWhatFollows(t *testing.T) {
 	// As an older witness left it: event 3 held, event 2 missing.
 	var parsed map[string]interface{}
 	json.Unmarshal(three, &parsed)
-	if _, _, err := st.AcceptEvent(c.aid, 3, parsed); err != nil {
+	if _, _, err := st.AcceptEvent(c.aid, 3, parsed, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	other, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: c.aid, PriorSAID: c.said[1], SN: 2,
@@ -292,7 +292,7 @@ func TestAStrangersEventsTakeNoEscrowAndRecordNoConflict(t *testing.T) {
 	// event for 2 that disagrees with it.
 	var parsed map[string]interface{}
 	json.Unmarshal(three, &parsed)
-	st.AcceptEvent(c.aid, 3, parsed)
+	st.AcceptEvent(c.aid, 3, parsed, "", "")
 	postEvent(t, router, c.aid, one, c.priv)
 	other, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: c.aid, PriorSAID: c.said[1], SN: 2,
 		Data: []json.RawMessage{json.RawMessage(`{"d":"` + c.said[1] + `","other":"history"}`)}})
@@ -340,5 +340,75 @@ func TestNothingIsHeldBackForAnUnknownIdentity(t *testing.T) {
 	two := c.interact(t)
 	if rec := postEvent(t, router, c.aid, two, c.priv); rec.Code == http.StatusAccepted {
 		t.Fatal("an event was held back for an identity with no inception here")
+	}
+}
+
+func postEventFrom(t *testing.T, router http.Handler, ip, aid string, raw []byte, priv ed25519.PrivateKey) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"aid": aid, "event_b64": base64.StdEncoding.EncodeToString(raw),
+		"cesr_signature": cesrSig(ed25519.Sign(priv, raw)),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/witness/event", bytes.NewReader(body))
+	req.RemoteAddr = ip + ":1234"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+// Identities made for the purpose, each holding events back from its own
+// address, cannot fill the escrow so that an established identity's event,
+// arriving before its predecessor, has nowhere to wait.
+func TestFreshIdentitiesCannotCrowdOutAnEstablishedOne(t *testing.T) {
+	total, reserved := store.EscrowTotalLimit, store.EscrowReserved
+	store.EscrowTotalLimit, store.EscrowReserved = 30, 10
+	t.Cleanup(func() { store.EscrowTotalLimit, store.EscrowReserved = total, reserved })
+	router, _ := hexWorld(t)
+	alice := newController(t)
+	postEventFrom(t, router, "10.1.0.1", alice.aid, alice.log[0], alice.priv)
+	postEventFrom(t, router, "10.1.0.1", alice.aid, alice.interact(t), alice.priv)
+	refused := 0
+	for i := 0; i < 30; i++ {
+		ip := fmt.Sprintf("10.2.%d.%d", i/200, i%200+1)
+		c := newController(t)
+		if rec := postEventFrom(t, router, ip, c.aid, c.log[0], c.priv); rec.Code != http.StatusOK {
+			t.Fatalf("inception: %d %s", rec.Code, rec.Body.String())
+		}
+		c.interact(t)
+		if rec := postEventFrom(t, router, ip, c.aid, c.interact(t), c.priv); rec.Code == http.StatusTooManyRequests {
+			refused++
+		}
+	}
+	if refused != 10 {
+		t.Fatalf("%d fresh identities were refused, where the reserve is 10", refused)
+	}
+	alice.interact(t)
+	alice.interact(t)
+	if rec := postEventFrom(t, router, "10.1.0.1", alice.aid, alice.log[3], alice.priv); rec.Code != http.StatusAccepted {
+		t.Fatalf("the established identity's early event was answered %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A witness hands back an event it holds exactly as published and signed.
+func TestAWitnessHandsBackAnEvent(t *testing.T) {
+	router, _ := hexWorld(t)
+	c := newController(t)
+	postEvent(t, router, c.aid, c.log[0], c.priv)
+	one := c.interact(t)
+	postEvent(t, router, c.aid, one, c.priv)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/witness/kel/"+c.aid+"/event/1", nil))
+	var out struct {
+		Raw string `json:"raw_bytes_b64"`
+		Sig string `json:"cesr_signature"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if rec.Code != http.StatusOK || out.Raw != base64.StdEncoding.EncodeToString(one) || out.Sig != cesrSig(ed25519.Sign(c.priv, one)) {
+		t.Fatalf("handed back %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+c.aid+"/event/5", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("an event not held was answered %d", rec.Code)
 	}
 }

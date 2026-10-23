@@ -63,6 +63,12 @@ as its prior; one that is not is held back and the disagreement recorded.
 
 ### Repairing events stored before sequence numbers were read as hex
 
+Checked against copies of the three production witness databases on
+2026-10-23, there was nothing to repair: no identity there had an event past
+place 9. The tool is kept for any other deployment. It never runs on its own:
+the repair runs only where `WW_REPAIR_SEQUENCES` is set, and no deployment
+configuration sets it.
+
 A witness that stored events while it read sequence numbers as decimal holds
 events from `10` on at the wrong place, has refused events `a` to `f`, and may
 hold `digest_conflicts` rows that misreading wrote. To find them, without

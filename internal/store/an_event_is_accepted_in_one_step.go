@@ -61,7 +61,7 @@ func eventsIn(ctx context.Context, c *sql.Conn, aid string) ([]map[string]interf
 // what is held: duplicate is true and nothing is written. Something else at
 // that place is a conflict, recorded as one. An event that fills a place left
 // empty moves every later rolling digest, so each is recomputed.
-func (s *ServiceStore) AcceptEvent(aid string, seq int, event map[string]interface{}) (kelDigest string, duplicate bool, err error) {
+func (s *ServiceStore) AcceptEvent(aid string, seq int, event map[string]interface{}, rawB64, sig string) (kelDigest string, duplicate bool, err error) {
 	said, _ := event["d"].(string)
 	var existing, theirs string
 	err = s.immediately(func(ctx context.Context, c *sql.Conn) error {
@@ -89,8 +89,8 @@ func (s *ServiceStore) AcceptEvent(aid string, seq int, event map[string]interfa
 			return err
 		}
 		kelDigest = d
-		if _, err := c.ExecContext(ctx, `INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at) VALUES (?,?,?,?,?)`,
-			aid, seq, string(b), d, now); err != nil {
+		if _, err := c.ExecContext(ctx, `INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at, raw_b64, cesr_signature) VALUES (?,?,?,?,?,?,?)`,
+			aid, seq, string(b), d, now, rawB64, sig); err != nil {
 			return err
 		}
 		if _, err := c.ExecContext(ctx, `INSERT INTO observations (aid, sequence_num, kel_digest, observed_at) VALUES (?,?,?,?)
@@ -166,6 +166,15 @@ func (s *ServiceStore) UnbrokenTip(aid string) (int, string, error) {
 	if err != sql.ErrNoRows {
 		return -1, "", err
 	}
+	// Nothing held for it: answered so, without writing anything, since
+	// anybody may ask about any identifier.
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM kel_events WHERE aid=?`, aid).Scan(&count); err != nil {
+		return -1, "", err
+	}
+	if count == 0 {
+		return -1, "", nil
+	}
 	// Held before tips were kept: worked out once, and kept.
 	var tip int
 	var tipSAID string
@@ -173,6 +182,11 @@ func (s *ServiceStore) UnbrokenTip(aid string) (int, string, error) {
 		held, err := eventsIn(ctx, c, aid)
 		if err != nil {
 			return err
+		}
+		for _, ev := range held {
+			if digest.EventSeq(ev) < 0 {
+				return fmt.Errorf("an event held for %s has no readable place in its log", aid)
+			}
 		}
 		if err := advanceUnbrokenTip(ctx, c, aid, held); err != nil {
 			return err

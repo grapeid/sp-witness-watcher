@@ -7,9 +7,18 @@ import (
 
 // EscrowLimit is how many events one identity may have held back at once,
 // and EscrowLife how long one is held before it is dropped.
-const (
+//
+// EscrowTotalLimit bounds what is held back across every identity, of which
+// EscrowReserved is kept for identities with history here beyond their
+// inception: anybody can make identities of their own for nothing, and without
+// the reserve enough of them would fill the escrow and leave an established
+// identity's event nowhere to wait. EscrowPerSender bounds what one sender
+// (by address) may have held back at once.
+var (
 	EscrowLimit      = 64
 	EscrowTotalLimit = 10000
+	EscrowReserved   = 2000
+	EscrowPerSender  = 256
 	EscrowLife       = 24 * time.Hour
 )
 
@@ -25,7 +34,10 @@ type Escrowed struct {
 
 // EscrowEvent holds an event back until the one before it arrives, dropping
 // any held longer than EscrowLife first.
-func (s *ServiceStore) EscrowEvent(aid string, sn int, said, rawB64, sig string) error {
+//
+// established is an identity with history here beyond its inception; sender
+// is where the event came from.
+func (s *ServiceStore) EscrowEvent(aid string, sn int, said, rawB64, sig, sender string, established bool) error {
 	cutoff := time.Now().UTC().Add(-EscrowLife).Format(time.RFC3339)
 	_, _ = s.db.Exec(`DELETE FROM escrowed_events WHERE received_at < ?`, cutoff)
 	var n int
@@ -39,11 +51,24 @@ func (s *ServiceStore) EscrowEvent(aid string, sn int, said, rawB64, sig string)
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM escrowed_events`).Scan(&total); err != nil {
 		return err
 	}
-	if total >= EscrowTotalLimit {
+	limit := EscrowTotalLimit
+	if !established {
+		limit -= EscrowReserved
+	}
+	if total >= limit {
 		return ErrEscrowFull
 	}
-	_, err := s.db.Exec(`INSERT INTO escrowed_events (aid, sequence_num, said, raw_b64, cesr_signature, received_at) VALUES (?,?,?,?,?,?)
-		ON CONFLICT(aid, said) DO NOTHING`, aid, sn, said, rawB64, sig, time.Now().UTC().Format(time.RFC3339))
+	if sender != "" {
+		var bySender int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM escrowed_events WHERE client_ip=?`, sender).Scan(&bySender); err != nil {
+			return err
+		}
+		if bySender >= EscrowPerSender {
+			return ErrEscrowFull
+		}
+	}
+	_, err := s.db.Exec(`INSERT INTO escrowed_events (aid, sequence_num, said, raw_b64, cesr_signature, received_at, client_ip) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(aid, said) DO NOTHING`, aid, sn, said, rawB64, sig, time.Now().UTC().Format(time.RFC3339), sender)
 	return err
 }
 
