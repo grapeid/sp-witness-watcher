@@ -35,6 +35,7 @@ described in its architecture decision records:
 |---|---|---|---|
 | `POST` | `/witness/event` | witness | Verify and store a key event, return a signed receipt |
 | `GET` | `/witness/kel/{aid}` | witness | Serve the stored key event log replica |
+| `GET` | `/witness/kel/{aid}/tip?nonce=` | witness | How far the replica goes: the highest sequence number held with nothing missing below it, and that event's identifier, signed with this witness's key together with the nonce |
 | `GET` | `/public/kel-digest?aid=&seq=` | watcher | Signed digest at a sequence number, with `observed_since` |
 | `POST` | `/public/kel-check` | watcher | Peer cross-check: does your digest match mine? |
 | `POST` | `/enroll` | both | Start witnessing and watching an identity; returns where to send events |
@@ -43,6 +44,62 @@ described in its architecture decision records:
 The witness and watcher routes are also served under `/api` (`/api/witness/...`,
 `/api/public/...`, `/api/health`), which is where an Identity Agent addresses
 them.
+
+Sequence numbers are read as KERI writes them, in hexadecimal. An event this
+witness already holds is answered with its receipt, so a controller can send
+from where it thinks the witness stopped; a different event at a held place is
+a conflict. An event that fills a place left empty recomputes every later
+rolling digest.
+
+An event is accepted only if it is what it says it is: well formed, digesting
+to its own identifier, an inception deriving its identity's identifier, and any
+later event naming as its prior the event held one place before it. An event's signature is checked against the key in force, as this witness holds
+the log, before anything else; one that does not hold is refused, never held back
+or counted as a conflict. An event
+whose predecessor has not arrived is held back (at most 64 per identity, for at
+most 24 hours) and taken up, checked again, once the predecessor arrives. An
+event filling a place left empty must be the one the event held after it names
+as its prior; one that is not is held back and the disagreement recorded.
+
+### Repairing events stored before sequence numbers were read as hex
+
+Checked against copies of the three production witness databases on
+2026-10-23, there was nothing to repair: no identity there had an event past
+place 9. The tool is kept for any other deployment. It never runs on its own:
+the repair runs only where `WW_REPAIR_SEQUENCES` is set, and no deployment
+configuration sets it.
+
+A witness that stored events while it read sequence numbers as decimal holds
+events from `10` on at the wrong place, has refused events `a` to `f`, and may
+hold `digest_conflicts` rows that misreading wrote. To find them, without
+changing anything:
+
+```bash
+go run ./cmd/repair-sequences -data <data dir>        # locally, on a copy
+fly ssh console -a <app> -C "/app/repair-sequences"   # on Fly, read-only
+```
+
+The repair itself runs inside the server at start, before it listens, so
+nothing else writes meanwhile. Each identity is read and rewritten in one
+transaction; every moved row is recorded in `sequence_repairs` with its digest
+before and after and a copy of the row as it was. Conflict rows are reported
+and never deleted: a person judges them. On Fly:
+
+```bash
+fly secrets set WW_REPAIR_SEQUENCES=apply -a <app>   # restarts; repairs, then serves
+fly logs -a <app> | grep "sequences apply"           # what moved
+fly secrets unset WW_REPAIR_SEQUENCES -a <app>        # restarts without it
+```
+
+The events refused while misread are not recovered by the repair. The tip
+this witness signs stops below the first empty place, and a controller sends
+from there, so they arrive again the next time it sends.
+
+### Deploy order
+
+Deploy this witness before Identity Agents that ask for its tip. An Identity
+Agent that cannot get a witness's tip sends it nothing that pass, rather than
+its whole log.
 
 `POST /witness/event` requires the event's published bytes (`event_b64`) and the
 controller's signature over them (`cesr_signature`). Nothing is stored or

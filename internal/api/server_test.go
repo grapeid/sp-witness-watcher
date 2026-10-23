@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	keri "github.com/grapeid/keri-go"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -30,7 +31,8 @@ func TestWitnessWatcherFlow(t *testing.T) {
 	router := srv.Router()
 
 	// Enroll
-	enrollBody, _ := json.Marshal(map[string]string{"aid": "EAlice", "controller_aid": "EAlice"})
+	alice := newController(t)
+	enrollBody, _ := json.Marshal(map[string]string{"aid": alice.aid, "controller_aid": alice.aid})
 	enrollReq := httptest.NewRequest(http.MethodPost, "/enroll", bytes.NewReader(enrollBody))
 	enrollRec := httptest.NewRecorder()
 	router.ServeHTTP(enrollRec, enrollReq)
@@ -44,13 +46,10 @@ func TestWitnessWatcherFlow(t *testing.T) {
 	// because that is now the only form a witness will receipt. The parsed
 	// form this test used to send was never checked against anything, and
 	// storing an unchecked event moves the digest this service reports.
-	alicePub, alicePriv, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	icpRaw := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EAliceEvent0000000000000000000000000000000x","i":"EAlice","s":"0","k":["` + qb64Key(alicePub) + `"]}`)
+	alicePriv := alice.priv
+	icpRaw := alice.log[0]
 	evBody, _ := json.Marshal(map[string]interface{}{
-		"aid":            "EAlice",
+		"aid":            alice.aid,
 		"event_b64":      base64.StdEncoding.EncodeToString(icpRaw),
 		"cesr_signature": cesrSig(ed25519.Sign(alicePriv, icpRaw)),
 	})
@@ -64,9 +63,22 @@ func TestWitnessWatcherFlow(t *testing.T) {
 	// Conflicting event at the same seq — must reject (C3). Properly signed by
 	// Alice, so what is being tested is the fork detection and not the
 	// signature check that now precedes it.
-	forkRaw := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EAliceForked000000000000000000000000000000x","i":"EAlice","s":"0","k":["` + qb64Key(alicePub) + `"]}`)
+	// Two different interactions at the same place, both following the
+	// inception and both signed by Alice: a second history.
+	evOne := alice.interact(t)
+	oneBody, _ := json.Marshal(map[string]interface{}{
+		"aid": alice.aid, "event_b64": base64.StdEncoding.EncodeToString(evOne),
+		"cesr_signature": cesrSig(ed25519.Sign(alicePriv, evOne)),
+	})
+	oneRec := httptest.NewRecorder()
+	router.ServeHTTP(oneRec, httptest.NewRequest(http.MethodPost, "/witness/event", bytes.NewReader(oneBody)))
+	if oneRec.Code != http.StatusOK {
+		t.Fatalf("first interaction: %d %s", oneRec.Code, oneRec.Body.String())
+	}
+	forkRaw, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: alice.aid, PriorSAID: alice.said[0], SN: 1,
+		Data: []json.RawMessage{json.RawMessage(`{"d":"` + alice.said[0] + `","forked":"yes"}`)}})
 	ev2Body, _ := json.Marshal(map[string]interface{}{
-		"aid":            "EAlice",
+		"aid":            alice.aid,
 		"event_b64":      base64.StdEncoding.EncodeToString(forkRaw),
 		"cesr_signature": cesrSig(ed25519.Sign(alicePriv, forkRaw)),
 	})
@@ -78,7 +90,7 @@ func TestWitnessWatcherFlow(t *testing.T) {
 	}
 
 	// Kel digest (C5)
-	digReq := httptest.NewRequest(http.MethodGet, "/public/kel-digest?aid=EAlice&seq=0", nil)
+	digReq := httptest.NewRequest(http.MethodGet, "/public/kel-digest?aid="+alice.aid+"&seq=0", nil)
 	digRec := httptest.NewRecorder()
 	router.ServeHTTP(digRec, digReq)
 	if digRec.Code != http.StatusOK {
@@ -104,7 +116,7 @@ func TestWitnessWatcherFlow(t *testing.T) {
 	}
 
 	// Serve KEL (C2)
-	kelReq := httptest.NewRequest(http.MethodGet, "/witness/kel/EAlice", nil)
+	kelReq := httptest.NewRequest(http.MethodGet, "/witness/kel/"+alice.aid, nil)
 	kelRec := httptest.NewRecorder()
 	router.ServeHTTP(kelRec, kelReq)
 	if kelRec.Code != http.StatusOK {

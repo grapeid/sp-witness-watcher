@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/grapeid/sp-witness-watcher/internal/digest"
 	"github.com/grapeid/sp-witness-watcher/internal/signer"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
@@ -51,6 +51,8 @@ func (s *Server) Router() chi.Router {
 	witnessRoutes := func(r chi.Router) {
 		r.Post("/event", s.handleWitnessEvent)
 		r.Get("/kel/{aid}", s.handleWitnessKel)
+		r.Get("/kel/{aid}/tip", s.handleWitnessKelTip)
+		r.Get("/kel/{aid}/event/{sn}", s.handleWitnessKelEvent)
 	}
 	if roles.Witness {
 		r.Route("/witness", witnessRoutes)
@@ -188,30 +190,80 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 			"an event must carry the controller signature over its published bytes")
 		return
 	}
-	// Prior events are read first because a non-establishment event is signed
-	// by the key state they carry, not by anything in the event itself.
+	// The event must be what it says it is before anything else is believed:
+	// its contents digest to the identifier it claims, an inception derives
+	// the identity's identifier from itself, and any later event names, as
+	// its prior, the event this witness holds one place before it. Without
+	// this anybody could plant an inception, under an identifier no witness
+	// holds yet, that its real controller never made.
 	events, _ := s.Store.GetKELEvents(req.AID)
+	// The controller's signature, checked against the key in force as this
+	// witness holds the log, before the event is held back or counted as a
+	// conflict: otherwise anybody could fill an identity's escrow, or record
+	// conflicts against it, with events its controller never signed. An event
+	// whose signing key cannot be shown from what is held, such as one past a
+	// gap that held a rotation, is refused, and its controller sends again in
+	// order.
 	if err := verifyControllerSignature(rawEvent, event, req.CesrSignature, events); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	seq := digest.CurrentSeq([]map[string]interface{}{event})
-	if seq < 0 {
-		if v, ok := event["s"].(string); ok {
-			seq, _ = strconv.Atoi(v)
+	switch err := eventBelongsHere(rawEvent, events); {
+	case (errors.Is(err, errNoPredecessor) || errors.Is(err, errNextDisagrees)) && len(events) == 0:
+		// Nothing held back for an identity this witness holds nothing of:
+		// its controller sends its inception first.
+		writeErr(w, http.StatusBadRequest, "this witness holds no inception for this identity; send the log from its inception")
+		return
+	case errors.Is(err, errNoPredecessor), errors.Is(err, errNextDisagrees):
+		// Held back rather than refused: an event whose predecessor has not
+		// arrived waits for it, and one that disagrees with what is held after
+		// it waits too, with the disagreement recorded.
+		if errors.Is(err, errNextDisagrees) {
+			s.Store.RecordConflict(req.AID, seqOrMinus(event), "held-after-names-another", eventSAIDOf(event))
 		}
+		established, serr := s.Store.Established(req.AID)
+		if serr != nil {
+			writeErr(w, http.StatusInternalServerError, serr.Error())
+			return
+		}
+		if eerr := s.Store.EscrowEvent(req.AID, seqOrMinus(event), eventSAIDOf(event),
+			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature, senderOf(clientIP(r)), established); eerr != nil {
+			writeErr(w, http.StatusTooManyRequests, eerr.Error())
+			return
+		}
+		status := http.StatusAccepted
+		if errors.Is(err, errNextDisagrees) {
+			status = http.StatusConflict
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]interface{}{"escrowed": true, "reason": err.Error()})
+		return
+	case err != nil:
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	events = append(events, event)
-	d, err := digest.KelDigestAtSeq(events, seq)
+
+	seq, ok := eventSeqOf(event)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "the event's sequence number is not readable")
+		return
+	}
+	// An event already held at its place is answered with its receipt, as
+	// though it had just arrived, so a controller sending from where it thinks
+	// this witness stopped carries on. Something else there is a conflict.
+	d, _, err := s.Store.AcceptEvent(req.AID, seq, event, base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature)
+	if errors.Is(err, store.ErrConflict) {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.Store.StoreEvent(req.AID, seq, event, d); err != nil {
-		writeErr(w, http.StatusConflict, err.Error())
-		return
-	}
+	// Events held back for this one are taken up now, in order, each checked
+	// as though it had just arrived.
+	s.promoteEscrowed(req.AID, seq)
 	// A receipt covers the EVENT, and the event names itself: its `d` is a
 	// digest of its own contents, so a signature over that identifier is a
 	// signature over the event and nothing else.
@@ -243,6 +295,42 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		// Retained so an existing caller is not broken by this change.
 		"signature": s.Identity.Sign(receiptBody),
 		"signed_by": s.Identity.AID,
+	})
+}
+
+// tipStatement is what a witness signs when asked how far it holds an
+// identity's key log. Its form is the Identity Agent core's TipStatement, in
+// identity-agent-core/witness, and must stay byte-identical to it.
+func tipStatement(aid, nonce string, sn int, said string) string {
+	return fmt.Sprintf("witness-kel-tip/v1\n%s\n%s\n%d\n%s", aid, nonce, sn, said)
+}
+
+// handleWitnessKelTip answers how far this witness holds an identity's key
+// log: the highest place it holds with nothing missing below, and the event
+// there, or -1 and nothing,
+// signed with this witness's key together with the asker's nonce, so the
+// answer is fresh and its own. A controller asks this before sending, and
+// sends only what the witness lacks, rather than its whole log every time.
+func (s *Server) handleWitnessKelTip(w http.ResponseWriter, r *http.Request) {
+	if !s.lim.allow(clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
+	nonce := r.URL.Query().Get("nonce")
+	if nonce == "" || len(nonce) > 128 {
+		writeErr(w, http.StatusBadRequest, "a nonce is required")
+		return
+	}
+	aid := chi.URLParam(r, "aid")
+	sn, said, err := s.Store.UnbrokenTip(aid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonOK(w, map[string]interface{}{
+		"aid": aid, "nonce": nonce, "sn": sn, "said": said,
+		"witness_aid": s.Identity.AID,
+		"signature":   s.Identity.CESRSignature([]byte(tipStatement(aid, nonce, sn, said))),
 	})
 }
 
@@ -391,4 +479,99 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// senderOf groups an address with the others one sender is likely to hold:
+// an IPv6 address by its /64, which one host or network is usually given
+// whole; an IPv4 address alone.
+func senderOf(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() != nil {
+		return ip
+	}
+	return (&net.IPNet{IP: parsed.Mask(net.CIDRMask(64, 128)), Mask: net.CIDRMask(64, 128)}).String()
+}
+
+func seqOrMinus(event map[string]interface{}) int {
+	if n, ok := eventSeqOf(event); ok {
+		return n
+	}
+	return -1
+}
+
+func eventSAIDOf(event map[string]interface{}) string {
+	d, _ := event["d"].(string)
+	return d
+}
+
+// promoteEscrowed takes up, in order from after seq, the events held back
+// waiting for their predecessors, accepting each that now follows what is
+// held and is signed by the key in force, and stopping at the first place
+// none does.
+func (s *Server) promoteEscrowed(aid string, seq int) {
+	for next := seq + 1; ; next++ {
+		waiting, err := s.Store.EscrowedAt(aid, next)
+		if err != nil || len(waiting) == 0 {
+			return
+		}
+		taken := false
+		for _, e := range waiting {
+			raw, err := base64.StdEncoding.DecodeString(e.RawB64)
+			if err != nil {
+				s.Store.DropEscrowed(aid, e.SAID)
+				continue
+			}
+			var event map[string]interface{}
+			if json.Unmarshal(raw, &event) != nil {
+				s.Store.DropEscrowed(aid, e.SAID)
+				continue
+			}
+			held, _ := s.Store.GetKELEvents(aid)
+			if err := eventBelongsHere(raw, held); err != nil {
+				if !errors.Is(err, errNoPredecessor) && !errors.Is(err, errNextDisagrees) {
+					s.Store.DropEscrowed(aid, e.SAID)
+				}
+				continue
+			}
+			if err := verifyControllerSignature(raw, event, e.Signature, held); err != nil {
+				s.Store.DropEscrowed(aid, e.SAID)
+				continue
+			}
+			if _, _, err := s.Store.AcceptEvent(aid, next, event, e.RawB64, e.Signature); err != nil {
+				continue
+			}
+			s.Store.DropEscrowed(aid, e.SAID)
+			taken = true
+			break
+		}
+		if !taken {
+			return
+		}
+	}
+}
+
+// handleWitnessKelEvent hands back one event of an identity's log as its
+// controller published and signed it: how an Identity Agent finds an event
+// the device holding the identity's key signed, when the reply did not reach
+// it.
+func (s *Server) handleWitnessKelEvent(w http.ResponseWriter, r *http.Request) {
+	if !s.lim.allow(clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
+	sn, err := strconv.Atoi(chi.URLParam(r, "sn"))
+	if err != nil || sn < 0 {
+		writeErr(w, http.StatusBadRequest, "a place in the log is a number")
+		return
+	}
+	raw, sig, ok, err := s.Store.EventAt(chi.URLParam(r, "aid"), sn)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "no event is held there as it was published")
+		return
+	}
+	jsonOK(w, map[string]string{"raw_bytes_b64": raw, "cesr_signature": sig})
 }

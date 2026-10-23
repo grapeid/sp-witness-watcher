@@ -3,7 +3,6 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -20,7 +19,9 @@ func Open(dir string) (*ServiceStore, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "witness-watcher.db"))
+	// The wait for a busy database is set on every connection the pool opens:
+	// a PRAGMA run once applies to one connection only.
+	db, err := sql.Open("sqlite", filepath.Join(dir, "witness-watcher.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +69,37 @@ CREATE TABLE IF NOT EXISTS observations (
     observed_at TEXT NOT NULL,
     PRIMARY KEY (aid, sequence_num)
 );
+-- The highest place each identity's log is held with nothing missing below
+-- it, kept as events arrive, so the tip is answered without reading the log.
+CREATE TABLE IF NOT EXISTS unbroken_tips (
+    aid TEXT PRIMARY KEY,
+    sequence_num INTEGER NOT NULL,
+    said TEXT NOT NULL
+);
+-- Events held back because the event before them had not arrived: taken up,
+-- in order, once it does. Bounded per identity, and expired.
+CREATE TABLE IF NOT EXISTS escrowed_events (
+    aid TEXT NOT NULL,
+    sequence_num INTEGER NOT NULL,
+    said TEXT NOT NULL,
+    raw_b64 TEXT NOT NULL,
+    cesr_signature TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    PRIMARY KEY (aid, said)
+);
+-- Every row moved by a repair of sequence numbers, before and after, with a
+-- copy of the row as it was.
+CREATE TABLE IF NOT EXISTS sequence_repairs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    aid TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    seq_before INTEGER NOT NULL,
+    seq_after INTEGER NOT NULL,
+    digest_before TEXT NOT NULL,
+    digest_after TEXT NOT NULL,
+    row_before TEXT NOT NULL,
+    repaired_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS digest_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     aid TEXT NOT NULL,
@@ -77,7 +109,58 @@ CREATE TABLE IF NOT EXISTS digest_conflicts (
     detected_at TEXT NOT NULL
 );
 `)
+	if err != nil {
+		return err
+	}
+	// Each event as its controller published and signed it, so it can be
+	// handed back exactly (GET /witness/kel/{aid}/event/{sn}); and who sent
+	// each event held back, so one sender cannot fill the escrow.
+	for _, col := range []struct{ table, name string }{
+		{"kel_events", "raw_b64"}, {"kel_events", "cesr_signature"}, {"escrowed_events", "client_ip"},
+	} {
+		if err := s.addColumn(col.table, col.name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addColumn adds a text column to a table that lacks it.
+func (s *ServiceStore) addColumn(table, name string) error {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var have string
+		if err := rows.Scan(&have); err != nil {
+			return err
+		}
+		if have == name {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+// EventAt is the event held at sn of aid's log as its controller published
+// and signed it; ok is false when none is held there, or it was held before
+// witnesses kept the bytes.
+func (s *ServiceStore) EventAt(aid string, sn int) (rawB64, sig string, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT raw_b64, cesr_signature FROM kel_events WHERE aid=? AND sequence_num=?`, aid, sn).Scan(&rawB64, &sig)
+	if err == sql.ErrNoRows {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return rawB64, sig, rawB64 != "" && sig != "", nil
 }
 
 func (s *ServiceStore) Enroll(aid, controllerAID string) error {
@@ -118,31 +201,6 @@ func (s *ServiceStore) ObservedSince(aid string) (string, error) {
 }
 
 // StoreEvent stores a witness KEL event; returns conflict if same seq different digest.
-func (s *ServiceStore) StoreEvent(aid string, seq int, event map[string]interface{}, digest string) error {
-	var existingDigest string
-	err := s.db.QueryRow(`SELECT event_digest FROM kel_events WHERE aid=? AND sequence_num=?`, aid, seq).Scan(&existingDigest)
-	if err == nil && existingDigest != digest {
-		_, _ = s.db.Exec(`INSERT INTO digest_conflicts (aid, sequence_num, digest_a, digest_b, detected_at) VALUES (?,?,?,?,?)`,
-			aid, seq, existingDigest, digest, time.Now().UTC().Format(time.RFC3339))
-		return fmt.Errorf("conflicting event at seq %d", seq)
-	}
-	if err == nil {
-		return nil // idempotent same event
-	}
-	b, _ := json.Marshal(event)
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.Exec(`INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at) VALUES (?,?,?,?,?)`,
-		aid, seq, string(b), digest, now)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`
-		INSERT INTO observations (aid, sequence_num, kel_digest, observed_at) VALUES (?,?,?,?)
-		ON CONFLICT(aid, sequence_num) DO UPDATE SET kel_digest=excluded.kel_digest, observed_at=excluded.observed_at`,
-		aid, seq, digest, now)
-	return err
-}
-
 func (s *ServiceStore) GetKELEvents(aid string) ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(`SELECT event_json FROM kel_events WHERE aid=? ORDER BY sequence_num`, aid)
 	if err != nil {
