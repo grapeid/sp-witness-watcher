@@ -97,6 +97,9 @@ func (s *ServiceStore) AcceptEvent(aid string, seq int, event map[string]interfa
 			ON CONFLICT(aid, sequence_num) DO UPDATE SET kel_digest=excluded.kel_digest`, aid, seq, d, now); err != nil {
 			return err
 		}
+		if err := advanceUnbrokenTip(ctx, c, aid, all); err != nil {
+			return err
+		}
 		// Every later place's rolling digest covers this event now.
 		for _, ev := range held {
 			later := digest.EventSeq(ev)
@@ -151,14 +154,41 @@ func withoutSeq(events []map[string]interface{}, seq int) []map[string]interface
 // UnbrokenTip is the highest place this witness holds with nothing missing
 // below it, and the event there; -1 and "" when it holds no inception. A
 // controller sends from the place after it, so a place left empty is filled
-// rather than stepped over.
+// rather than stepped over. It is kept as events arrive, not worked out from
+// the log each time it is asked.
 func (s *ServiceStore) UnbrokenTip(aid string) (int, string, error) {
-	events, err := s.GetKELEvents(aid)
+	var sn int
+	var said string
+	err := s.db.QueryRow(`SELECT sequence_num, said FROM unbroken_tips WHERE aid=?`, aid).Scan(&sn, &said)
+	if err == nil {
+		return sn, said, nil
+	}
+	if err != sql.ErrNoRows {
+		return -1, "", err
+	}
+	// Held before tips were kept: worked out once, and kept.
+	var tip int
+	var tipSAID string
+	err = s.immediately(func(ctx context.Context, c *sql.Conn) error {
+		held, err := eventsIn(ctx, c, aid)
+		if err != nil {
+			return err
+		}
+		if err := advanceUnbrokenTip(ctx, c, aid, held); err != nil {
+			return err
+		}
+		return c.QueryRowContext(ctx, `SELECT sequence_num, said FROM unbroken_tips WHERE aid=?`, aid).Scan(&tip, &tipSAID)
+	})
 	if err != nil {
 		return -1, "", err
 	}
+	return tip, tipSAID, nil
+}
+
+// advanceUnbrokenTip sets aid's unbroken tip from the events held.
+func advanceUnbrokenTip(ctx context.Context, c *sql.Conn, aid string, held []map[string]interface{}) error {
 	at := map[int]string{}
-	for _, ev := range events {
+	for _, ev := range held {
 		said, _ := ev["d"].(string)
 		at[digest.EventSeq(ev)] = said
 	}
@@ -166,8 +196,11 @@ func (s *ServiceStore) UnbrokenTip(aid string) (int, string, error) {
 	for {
 		next, ok := at[tip+1]
 		if !ok {
-			return tip, said, nil
+			break
 		}
 		tip, said = tip+1, next
 	}
+	_, err := c.ExecContext(ctx, `INSERT INTO unbroken_tips (aid, sequence_num, said) VALUES (?,?,?)
+		ON CONFLICT(aid) DO UPDATE SET sequence_num=excluded.sequence_num, said=excluded.said`, aid, tip, said)
+	return err
 }

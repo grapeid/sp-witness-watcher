@@ -208,21 +208,20 @@ func TestALogWithAGapIsTakenUpWhenTheGapFills(t *testing.T) {
 	}
 }
 
-// An event held back with a signature that does not hold is not taken up.
-func TestAnEventHeldBackIsCheckedWhenTakenUp(t *testing.T) {
+// An event past a gap whose signature does not hold is refused, not held
+// back, and the genuine event takes its place once the gap fills.
+func TestAWronglySignedEventPastAGapIsRefused(t *testing.T) {
 	router, _ := hexWorld(t)
 	c := newController(t)
 	postEvent(t, router, c.aid, c.log[0], c.priv)
 	one, two := c.interact(t), c.interact(t)
 	_, other, _ := ed25519.GenerateKey(nil)
-	if rec := postEvent(t, router, c.aid, two, other); rec.Code != http.StatusAccepted {
-		t.Fatalf("held back: %d", rec.Code)
+	if rec := postEvent(t, router, c.aid, two, other); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a wrongly signed event past a gap was answered %d", rec.Code)
 	}
 	postEvent(t, router, c.aid, one, c.priv)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+c.aid+"/tip?nonce=n", nil))
-	if !strings.Contains(rec.Body.String(), `"sn":1`) {
-		t.Fatalf("an event held back with a signature that does not hold was taken up: %s", rec.Body.String())
+	if rec := postEvent(t, router, c.aid, two, c.priv); rec.Code != http.StatusOK {
+		t.Fatalf("the genuine event: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -262,5 +261,47 @@ func TestFillingAGapMustAgreeWithWhatFollows(t *testing.T) {
 	events, _ := st.GetKELEvents(c.aid)
 	if len(events) != 4 {
 		t.Fatalf("%d events held", len(events))
+	}
+}
+
+// Events a stranger signed are neither held back nor counted as conflicts:
+// they could otherwise fill an identity's escrow, or accuse it of a second
+// history, without its controller ever signing anything.
+func TestAStrangersEventsTakeNoEscrowAndRecordNoConflict(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	id, _ := signer.LoadOrCreate(filepath.Join(dir, "id"))
+	router := New(st, id).Router()
+	c := newController(t)
+	_, stranger, _ := ed25519.GenerateKey(nil)
+	postEvent(t, router, c.aid, c.log[0], c.priv)
+	one, two, three := c.interact(t), c.interact(t), c.interact(t)
+	_ = one
+	if rec := postEvent(t, router, c.aid, three, stranger); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a stranger's event past a gap was answered %d", rec.Code)
+	}
+	if held, _ := st.EscrowedAt(c.aid, 3); len(held) != 0 {
+		t.Fatal("a stranger's event was held back")
+	}
+	// As an older witness left it: event 3 held, 2 missing; a stranger's
+	// event for 2 that disagrees with it.
+	var parsed map[string]interface{}
+	json.Unmarshal(three, &parsed)
+	st.AcceptEvent(c.aid, 3, parsed)
+	postEvent(t, router, c.aid, one, c.priv)
+	other, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: c.aid, PriorSAID: c.said[1], SN: 2,
+		Data: []json.RawMessage{json.RawMessage(`{"d":"` + c.said[1] + `","other":"history"}`)}})
+	if rec := postEvent(t, router, c.aid, other, stranger); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a stranger's disagreeing event was answered %d", rec.Code)
+	}
+	if found, _ := st.RepairSequences(false); len(found) != 0 && found[0].Conflicts != 0 {
+		t.Fatalf("a stranger's event recorded a conflict: %+v", found)
+	}
+	if rec := postEvent(t, router, c.aid, two, c.priv); rec.Code != http.StatusOK {
+		t.Fatalf("the genuine event: %d %s", rec.Code, rec.Body.String())
 	}
 }

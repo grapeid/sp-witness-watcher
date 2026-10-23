@@ -66,7 +66,14 @@ func (s *ServiceStore) RepairSequences(apply bool) ([]SequenceRepair, error) {
 			if err != nil || !apply || r.Misplaced == 0 {
 				return err
 			}
-			return renumber(ctx, c, aid, events)
+			if err := renumber(ctx, c, aid, events); err != nil {
+				return err
+			}
+			held, err := eventsIn(ctx, c, aid)
+			if err != nil {
+				return err
+			}
+			return advanceUnbrokenTip(ctx, c, aid, held)
 		})
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", aid, err)

@@ -69,6 +69,13 @@ CREATE TABLE IF NOT EXISTS observations (
     observed_at TEXT NOT NULL,
     PRIMARY KEY (aid, sequence_num)
 );
+-- The highest place each identity's log is held with nothing missing below
+-- it, kept as events arrive, so the tip is answered without reading the log.
+CREATE TABLE IF NOT EXISTS unbroken_tips (
+    aid TEXT PRIMARY KEY,
+    sequence_num INTEGER NOT NULL,
+    said TEXT NOT NULL
+);
 -- Events held back because the event before them had not arrived: taken up,
 -- in order, once it does. Bounded per identity, and expired.
 CREATE TABLE IF NOT EXISTS escrowed_events (

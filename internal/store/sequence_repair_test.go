@@ -217,3 +217,21 @@ func TestTheEscrowIsBoundedAndExpires(t *testing.T) {
 		t.Fatal("an expired event is still held back")
 	}
 }
+
+// The tip is kept as events arrive and answered without reading the log.
+func TestTheTipIsKeptNotReadFromTheLog(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	for sn := 0; sn <= 3; sn++ {
+		ev := map[string]interface{}{"t": "ixn", "d": fmt.Sprintf("E%x", sn), "i": "EAid", "s": fmt.Sprintf("%x", sn)}
+		if _, _, err := st.AcceptEvent("EAid", sn, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Were the tip worked out from the log, a log emptied underneath would
+	// change it.
+	st.db.Exec(`DELETE FROM kel_events WHERE aid='EAid'`)
+	if tip, said, _ := st.UnbrokenTip("EAid"); tip != 3 || said != "E3" {
+		t.Fatalf("the tip kept is %d %s", tip, said)
+	}
+}

@@ -196,6 +196,17 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 	// this anybody could plant an inception, under an identifier no witness
 	// holds yet, that its real controller never made.
 	events, _ := s.Store.GetKELEvents(req.AID)
+	// The controller's signature, checked against the key in force as this
+	// witness holds the log, before the event is held back or counted as a
+	// conflict: otherwise anybody could fill an identity's escrow, or record
+	// conflicts against it, with events its controller never signed. An event
+	// whose signing key cannot be shown from what is held, such as one past a
+	// gap that held a rotation, is refused, and its controller sends again in
+	// order.
+	if err := verifyControllerSignature(rawEvent, event, req.CesrSignature, events); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch err := eventBelongsHere(rawEvent, events); {
 	case errors.Is(err, errNoPredecessor), errors.Is(err, errNextDisagrees):
 		// Held back rather than refused: an event whose predecessor has not
@@ -218,12 +229,6 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"escrowed": true, "reason": err.Error()})
 		return
 	case err != nil:
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	// Prior events are read first because a non-establishment event is signed
-	// by the key state they carry, not by anything in the event itself.
-	if err := verifyControllerSignature(rawEvent, event, req.CesrSignature, events); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

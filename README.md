@@ -53,7 +53,9 @@ rolling digest.
 
 An event is accepted only if it is what it says it is: well formed, digesting
 to its own identifier, an inception deriving its identity's identifier, and any
-later event naming as its prior the event held one place before it. An event
+later event naming as its prior the event held one place before it. An event's signature is checked against the key in force, as this witness holds
+the log, before anything else; one that does not hold is refused, never held back
+or counted as a conflict. An event
 whose predecessor has not arrived is held back (at most 64 per identity, for at
 most 24 hours) and taken up, checked again, once the predecessor arrives. An
 event filling a place left empty must be the one the event held after it names
