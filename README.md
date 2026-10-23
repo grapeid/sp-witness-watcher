@@ -35,6 +35,7 @@ described in its architecture decision records:
 |---|---|---|---|
 | `POST` | `/witness/event` | witness | Verify and store a key event, return a signed receipt |
 | `GET` | `/witness/kel/{aid}` | witness | Serve the stored key event log replica |
+| `GET` | `/witness/kel/{aid}/tip?nonce=` | witness | How far the replica goes: the newest event's sequence number and identifier, signed with this witness's key together with the nonce |
 | `GET` | `/public/kel-digest?aid=&seq=` | watcher | Signed digest at a sequence number, with `observed_since` |
 | `POST` | `/public/kel-check` | watcher | Peer cross-check: does your digest match mine? |
 | `POST` | `/enroll` | both | Start witnessing and watching an identity; returns where to send events |
@@ -43,6 +44,12 @@ described in its architecture decision records:
 The witness and watcher routes are also served under `/api` (`/api/witness/...`,
 `/api/public/...`, `/api/health`), which is where an Identity Agent addresses
 them.
+
+Sequence numbers are read as KERI writes them, in hexadecimal. A witness that
+stored events before this read them as decimal: `go run ./cmd/repair-sequences
+-data <dir>` reports any identity whose events sit at the wrong place, and
+`-apply` moves them and recomputes the digests. Conflict rows are reported and
+never deleted.
 
 `POST /witness/event` requires the event's published bytes (`event_b64`) and the
 controller's signature over them (`cesr_signature`). Nothing is stored or

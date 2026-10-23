@@ -67,11 +67,22 @@ func eventsUpToSeq(events []map[string]interface{}, seq int) ([]map[string]inter
 	return out, nil
 }
 
+// EventSeq is an event's sequence number. KERI writes it in hexadecimal: the
+// eleventh event is "a" and the seventeenth "10". Read as decimal, "a" became
+// 0, collided with the inception and was recorded as a conflicting history.
+// An unreadable one is -1.
+func EventSeq(ev map[string]interface{}) int {
+	return eventSeq(ev)
+}
+
 func eventSeq(ev map[string]interface{}) int {
 	switch v := ev["s"].(type) {
 	case string:
-		n, _ := strconv.Atoi(v)
-		return n
+		n, err := strconv.ParseInt(v, 16, 64)
+		if err != nil || n < 0 {
+			return -1
+		}
+		return int(n)
 	case float64:
 		return int(v)
 	default:

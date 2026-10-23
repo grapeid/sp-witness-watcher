@@ -51,6 +51,7 @@ func (s *Server) Router() chi.Router {
 	witnessRoutes := func(r chi.Router) {
 		r.Post("/event", s.handleWitnessEvent)
 		r.Get("/kel/{aid}", s.handleWitnessKel)
+		r.Get("/kel/{aid}/tip", s.handleWitnessKelTip)
 	}
 	if roles.Witness {
 		r.Route("/witness", witnessRoutes)
@@ -196,11 +197,10 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	seq := digest.CurrentSeq([]map[string]interface{}{event})
-	if seq < 0 {
-		if v, ok := event["s"].(string); ok {
-			seq, _ = strconv.Atoi(v)
-		}
+	seq, ok := eventSeqOf(event)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "the event's sequence number is not readable")
+		return
 	}
 	events = append(events, event)
 	d, err := digest.KelDigestAtSeq(events, seq)
@@ -243,6 +243,48 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		// Retained so an existing caller is not broken by this change.
 		"signature": s.Identity.Sign(receiptBody),
 		"signed_by": s.Identity.AID,
+	})
+}
+
+// tipStatement is what a witness signs when asked how far it holds an
+// identity's key log. Its form is the Identity Agent core's TipStatement, in
+// identity-agent-core/witness, and must stay byte-identical to it.
+func tipStatement(aid, nonce string, sn int, said string) string {
+	return fmt.Sprintf("witness-kel-tip/v1\n%s\n%s\n%d\n%s", aid, nonce, sn, said)
+}
+
+// handleWitnessKelTip answers how far this witness holds an identity's key
+// log: the newest event's sequence number and identifier, or -1 and nothing,
+// signed with this witness's key together with the asker's nonce, so the
+// answer is fresh and its own. A controller asks this before sending, and
+// sends only what the witness lacks, rather than its whole log every time.
+func (s *Server) handleWitnessKelTip(w http.ResponseWriter, r *http.Request) {
+	if !s.lim.allow(clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
+	nonce := r.URL.Query().Get("nonce")
+	if nonce == "" || len(nonce) > 128 {
+		writeErr(w, http.StatusBadRequest, "a nonce is required")
+		return
+	}
+	aid := chi.URLParam(r, "aid")
+	events, err := s.Store.GetKELEvents(aid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sn, said := -1, ""
+	for _, ev := range events {
+		if n := digest.EventSeq(ev); n > sn {
+			sn = n
+			said, _ = ev["d"].(string)
+		}
+	}
+	jsonOK(w, map[string]interface{}{
+		"aid": aid, "nonce": nonce, "sn": sn, "said": said,
+		"witness_aid": s.Identity.AID,
+		"signature":   s.Identity.CESRSignature([]byte(tipStatement(aid, nonce, sn, said))),
 	})
 }
 
