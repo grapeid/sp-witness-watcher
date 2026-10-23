@@ -30,6 +30,20 @@ func main() {
 	}
 	defer st.Close()
 
+	// Events stored while sequence numbers were read as decimal are repaired
+	// here, before the server listens, so nothing else writes meanwhile.
+	// "report" lists them; "apply" moves them, keeping a record of each move.
+	if mode := os.Getenv("WW_REPAIR_SEQUENCES"); mode == "report" || mode == "apply" {
+		found, err := st.RepairSequences(mode == "apply")
+		if err != nil {
+			log.Fatalf("[sp-witness-watcher] repairing sequence numbers: %v", err)
+		}
+		for _, r := range found {
+			log.Printf("[sp-witness-watcher] sequences %s: %s misplaced=%d conflicts=%d missing=%v", mode, r.AID, r.Misplaced, r.Conflicts, r.Missing)
+		}
+		log.Printf("[sp-witness-watcher] sequences %s: %d identities", mode, len(found))
+	}
+
 	id, err := signer.LoadOrCreate(dataDir)
 	if err != nil {
 		log.Fatal(err)

@@ -107,3 +107,47 @@ func TestTheTipStatementMatchesTheCore(t *testing.T) {
 		t.Fatalf("the tip statement is %q", got)
 	}
 }
+
+// The same event sent again is answered with its receipt, not a conflict, so
+// a controller sending from where it thinks the witness stopped carries on.
+func TestTheSameEventAgainIsReceipted(t *testing.T) {
+	router, _ := hexWorld(t)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	icp := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EAgain0","i":"EAgain","s":"0","k":["` + qb64Key(pub) + `"]}`)
+	first := postEvent(t, router, "EAgain", icp, priv)
+	again := postEvent(t, router, "EAgain", icp, priv)
+	if first.Code != http.StatusOK || again.Code != http.StatusOK {
+		t.Fatalf("the same event again: %d then %d %s", first.Code, again.Code, again.Body.String())
+	}
+	var a, b map[string]interface{}
+	json.Unmarshal(first.Body.Bytes(), &a)
+	json.Unmarshal(again.Body.Bytes(), &b)
+	if a["cesr_signature"] != b["cesr_signature"] || a["event_said"] != b["event_said"] {
+		t.Fatal("the same event again was not answered with its receipt")
+	}
+}
+
+// The tip a witness signs is the highest place with nothing missing below.
+func TestTheTipStopsAtAPlaceLeftEmpty(t *testing.T) {
+	router, _ := hexWorld(t)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	aid := "EHoled"
+	icp := []byte(`{"v":"KERI10JSON000256_","t":"icp","d":"EHoled0","i":"` + aid + `","s":"0","k":["` + qb64Key(pub) + `"]}`)
+	postEvent(t, router, aid, icp, priv)
+	for _, sn := range []int{1, 3} {
+		ixn := []byte(fmt.Sprintf(`{"v":"KERI10JSON000100_","t":"ixn","d":"EHoled%x","i":"%s","s":"%x","a":[]}`, sn, aid, sn))
+		if rec := postEvent(t, router, aid, ixn, priv); rec.Code != http.StatusOK {
+			t.Fatalf("event %d: %d %s", sn, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+aid+"/tip?nonce=n", nil))
+	var tip struct {
+		SN   int    `json:"sn"`
+		SAID string `json:"said"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &tip)
+	if tip.SN != 1 || tip.SAID != "EHoled1" {
+		t.Fatalf("with place 2 empty the tip reads %+v", tip)
+	}
+}

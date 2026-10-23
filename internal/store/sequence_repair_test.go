@@ -3,6 +3,8 @@ package store
 import (
 	"fmt"
 	"testing"
+
+	"github.com/grapeid/sp-witness-watcher/internal/digest"
 )
 
 // Events stored while sequence numbers were read as decimal are found, and
@@ -66,7 +68,122 @@ func TestEventsStoredAtTheWrongPlaceAreRepaired(t *testing.T) {
 	if conflicts != 1 {
 		t.Fatal("a conflict row was removed")
 	}
+	// Every moved row is recorded, before and after, with a copy of the old
+	// row: two events and their two observations.
+	var moved, kept int
+	st.db.QueryRow(`SELECT COUNT(*) FROM sequence_repairs WHERE aid=? AND seq_before != seq_after`, aid).Scan(&moved)
+	st.db.QueryRow(`SELECT COUNT(*) FROM sequence_repairs WHERE aid=? AND kind='event' AND seq_before=10 AND seq_after=16 AND digest_before='Ewrong' AND row_before LIKE '%"s\":\"10\"%'`, aid).Scan(&kept)
+	if moved != 4 || kept != 1 {
+		t.Fatalf("the repair recorded %d moves, and the old row of event 10 %d times", moved, kept)
+	}
 	if after, _ := st.RepairSequences(false); len(after) != 1 || after[0].Misplaced != 0 {
 		t.Fatalf("after repair the report reads %+v", after)
+	}
+}
+
+// An event written while a repair runs is neither lost nor misplaced: the
+// repair holds the write lock while it reads and rewrites, and the write
+// waits for it.
+func TestAWriteDuringARepairIsKept(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	aid := "EBusy"
+	for sn := 0; sn <= 9; sn++ {
+		ev := fmt.Sprintf(`{"t":"ixn","d":"E%x","i":"%s","s":"%x"}`, sn, aid, sn)
+		st.db.Exec(`INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at) VALUES (?,?,?,?,?)`, aid, sn, ev, "Ewrong", "t")
+	}
+	for _, sn := range []int{0x10, 0x11, 0x12} {
+		ev := fmt.Sprintf(`{"t":"ixn","d":"E%x","i":"%s","s":"%x"}`, sn, aid, sn)
+		st.db.Exec(`INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at) VALUES (?,?,?,?,?)`, aid, 10+sn-0x10, ev, "Ewrong", "t")
+	}
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 20; i++ {
+			ev := map[string]interface{}{"t": "ixn", "d": fmt.Sprintf("EOther%d", i), "i": "EOther", "s": fmt.Sprintf("%x", i)}
+			if _, _, err := st.AcceptEvent("EOther", i, ev); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	if _, err := st.RepairSequences(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("a write during the repair failed: %v", err)
+	}
+	other, _ := st.GetKELEvents("EOther")
+	busy, _ := st.GetKELEvents(aid)
+	if len(other) != 20 || len(busy) != 13 {
+		t.Fatalf("after the repair: %d of 20 written meanwhile, %d of 13 repaired", len(other), len(busy))
+	}
+	if r, _ := st.RepairSequences(false); len(r) != 1 || r[0].Misplaced != 0 {
+		t.Fatalf("after the repair the report reads %+v", r)
+	}
+}
+
+// The same event again is answered with what is held and writes no conflict;
+// something else at the place is a conflict, recorded.
+func TestTheSameEventAgainIsNoConflict(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	ev := map[string]interface{}{"t": "icp", "d": "E0", "i": "EAid", "s": "0"}
+	d1, dup1, err := st.AcceptEvent("EAid", 0, ev)
+	if err != nil || dup1 {
+		t.Fatal(err)
+	}
+	d2, dup2, err := st.AcceptEvent("EAid", 0, ev)
+	if err != nil || !dup2 || d2 != d1 {
+		t.Fatalf("the same event again: %v %v %v", err, dup2, d2 == d1)
+	}
+	var conflicts int
+	st.db.QueryRow(`SELECT COUNT(*) FROM digest_conflicts`).Scan(&conflicts)
+	if conflicts != 0 {
+		t.Fatal("the same event again wrote a conflict")
+	}
+	other := map[string]interface{}{"t": "icp", "d": "E0other", "i": "EAid", "s": "0"}
+	if _, _, err := st.AcceptEvent("EAid", 0, other); err == nil {
+		t.Fatal("a different event at a held place was accepted")
+	}
+	st.db.QueryRow(`SELECT COUNT(*) FROM digest_conflicts`).Scan(&conflicts)
+	if conflicts != 1 {
+		t.Fatal("a conflict was not recorded")
+	}
+}
+
+// The tip is the highest place with nothing missing below, and filling a
+// place left empty recomputes every later rolling digest.
+func TestFillingAHoleMovesTheTipAndTheLaterDigests(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	ev := func(sn int) map[string]interface{} {
+		return map[string]interface{}{"t": "ixn", "d": fmt.Sprintf("E%x", sn), "i": "EAid", "s": fmt.Sprintf("%x", sn)}
+	}
+	for _, sn := range []int{0, 1, 3} {
+		if _, _, err := st.AcceptEvent("EAid", sn, ev(sn)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tip, said, _ := st.UnbrokenTip("EAid"); tip != 1 || said != "E1" {
+		t.Fatalf("with place 2 empty the tip is %d %s", tip, said)
+	}
+	before, _, _ := st.GetObservationDigest("EAid", 3)
+	if _, _, err := st.AcceptEvent("EAid", 2, ev(2)); err != nil {
+		t.Fatal(err)
+	}
+	if tip, _, _ := st.UnbrokenTip("EAid"); tip != 3 {
+		t.Fatalf("with the hole filled the tip is %d", tip)
+	}
+	after, _, _ := st.GetObservationDigest("EAid", 3)
+	all, _ := st.GetKELEvents("EAid")
+	want, _ := digest.KelDigestAtSeq(all, 3)
+	var stored string
+	st.db.QueryRow(`SELECT event_digest FROM kel_events WHERE aid='EAid' AND sequence_num=3`).Scan(&stored)
+	if after == before || after != want || stored != want {
+		t.Fatal("the rolling digest after the filled place was not recomputed")
 	}
 }

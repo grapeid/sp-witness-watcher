@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/grapeid/sp-witness-watcher/internal/digest"
 	"github.com/grapeid/sp-witness-watcher/internal/signer"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
@@ -202,14 +202,16 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "the event's sequence number is not readable")
 		return
 	}
-	events = append(events, event)
-	d, err := digest.KelDigestAtSeq(events, seq)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	// An event already held at its place is answered with its receipt, as
+	// though it had just arrived, so a controller sending from where it thinks
+	// this witness stopped carries on. Something else there is a conflict.
+	d, _, err := s.Store.AcceptEvent(req.AID, seq, event)
+	if errors.Is(err, store.ErrConflict) {
+		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
-	if err := s.Store.StoreEvent(req.AID, seq, event, d); err != nil {
-		writeErr(w, http.StatusConflict, err.Error())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// A receipt covers the EVENT, and the event names itself: its `d` is a
@@ -254,7 +256,8 @@ func tipStatement(aid, nonce string, sn int, said string) string {
 }
 
 // handleWitnessKelTip answers how far this witness holds an identity's key
-// log: the newest event's sequence number and identifier, or -1 and nothing,
+// log: the highest place it holds with nothing missing below, and the event
+// there, or -1 and nothing,
 // signed with this witness's key together with the asker's nonce, so the
 // answer is fresh and its own. A controller asks this before sending, and
 // sends only what the witness lacks, rather than its whole log every time.
@@ -269,17 +272,10 @@ func (s *Server) handleWitnessKelTip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	aid := chi.URLParam(r, "aid")
-	events, err := s.Store.GetKELEvents(aid)
+	sn, said, err := s.Store.UnbrokenTip(aid)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-	sn, said := -1, ""
-	for _, ev := range events {
-		if n := digest.EventSeq(ev); n > sn {
-			sn = n
-			said, _ = ev["d"].(string)
-		}
 	}
 	jsonOK(w, map[string]interface{}{
 		"aid": aid, "nonce": nonce, "sn": sn, "said": said,

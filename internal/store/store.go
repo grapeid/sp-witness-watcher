@@ -3,7 +3,6 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -20,7 +19,9 @@ func Open(dir string) (*ServiceStore, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "witness-watcher.db"))
+	// The wait for a busy database is set on every connection the pool opens:
+	// a PRAGMA run once applies to one connection only.
+	db, err := sql.Open("sqlite", filepath.Join(dir, "witness-watcher.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +68,19 @@ CREATE TABLE IF NOT EXISTS observations (
     kel_digest TEXT NOT NULL,
     observed_at TEXT NOT NULL,
     PRIMARY KEY (aid, sequence_num)
+);
+-- Every row moved by a repair of sequence numbers, before and after, with a
+-- copy of the row as it was.
+CREATE TABLE IF NOT EXISTS sequence_repairs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    aid TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    seq_before INTEGER NOT NULL,
+    seq_after INTEGER NOT NULL,
+    digest_before TEXT NOT NULL,
+    digest_after TEXT NOT NULL,
+    row_before TEXT NOT NULL,
+    repaired_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS digest_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,31 +132,6 @@ func (s *ServiceStore) ObservedSince(aid string) (string, error) {
 }
 
 // StoreEvent stores a witness KEL event; returns conflict if same seq different digest.
-func (s *ServiceStore) StoreEvent(aid string, seq int, event map[string]interface{}, digest string) error {
-	var existingDigest string
-	err := s.db.QueryRow(`SELECT event_digest FROM kel_events WHERE aid=? AND sequence_num=?`, aid, seq).Scan(&existingDigest)
-	if err == nil && existingDigest != digest {
-		_, _ = s.db.Exec(`INSERT INTO digest_conflicts (aid, sequence_num, digest_a, digest_b, detected_at) VALUES (?,?,?,?,?)`,
-			aid, seq, existingDigest, digest, time.Now().UTC().Format(time.RFC3339))
-		return fmt.Errorf("conflicting event at seq %d", seq)
-	}
-	if err == nil {
-		return nil // idempotent same event
-	}
-	b, _ := json.Marshal(event)
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.Exec(`INSERT INTO kel_events (aid, sequence_num, event_json, event_digest, received_at) VALUES (?,?,?,?,?)`,
-		aid, seq, string(b), digest, now)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`
-		INSERT INTO observations (aid, sequence_num, kel_digest, observed_at) VALUES (?,?,?,?)
-		ON CONFLICT(aid, sequence_num) DO UPDATE SET kel_digest=excluded.kel_digest, observed_at=excluded.observed_at`,
-		aid, seq, digest, now)
-	return err
-}
-
 func (s *ServiceStore) GetKELEvents(aid string) ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(`SELECT event_json FROM kel_events WHERE aid=? ORDER BY sequence_num`, aid)
 	if err != nil {

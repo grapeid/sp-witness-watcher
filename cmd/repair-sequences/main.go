@@ -1,7 +1,7 @@
-// Command repair-sequences reports, and with -apply repairs, key events this
-// witness stored at the wrong place while it read KERI's hexadecimal sequence
-// numbers as decimal. It reports by default and changes nothing; conflict rows
-// are reported, never deleted.
+// Command repair-sequences reports key events this witness stored at the
+// wrong place while it read KERI's hexadecimal sequence numbers as decimal. It
+// only reports: the repair itself runs inside the server at start, before it
+// listens, with WW_REPAIR_SEQUENCES=apply, so nothing else writes meanwhile.
 package main
 
 import (
@@ -15,7 +15,6 @@ import (
 
 func main() {
 	dir := flag.String("data", os.Getenv("WW_DATA_DIR"), "the witness's data directory")
-	apply := flag.Bool("apply", false, "move misplaced events to their own places and recompute digests")
 	flag.Parse()
 	if *dir == "" {
 		log.Fatal("name the data directory with -data or WW_DATA_DIR")
@@ -25,7 +24,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer st.Close()
-	found, err := st.RepairSequences(*apply)
+	found, err := st.RepairSequences(false)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -36,9 +35,5 @@ func main() {
 	for _, r := range found {
 		fmt.Printf("%s misplaced=%d conflicts=%d missing=%v\n", r.AID, r.Misplaced, r.Conflicts, r.Missing)
 	}
-	if *apply {
-		fmt.Println("misplaced events moved; conflict rows left for a person to judge")
-	} else {
-		fmt.Println("nothing changed; run with -apply to move misplaced events")
-	}
+	fmt.Println("nothing changed; to repair, restart the server with WW_REPAIR_SEQUENCES=apply")
 }
