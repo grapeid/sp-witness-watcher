@@ -8,8 +8,9 @@ import (
 // EscrowLimit is how many events one identity may have held back at once,
 // and EscrowLife how long one is held before it is dropped.
 const (
-	EscrowLimit = 64
-	EscrowLife  = 24 * time.Hour
+	EscrowLimit      = 64
+	EscrowTotalLimit = 10000
+	EscrowLife       = 24 * time.Hour
 )
 
 // ErrEscrowFull is an identity with as many events held back as it may have.
@@ -32,6 +33,13 @@ func (s *ServiceStore) EscrowEvent(aid string, sn int, said, rawB64, sig string)
 		return err
 	}
 	if n >= EscrowLimit {
+		return ErrEscrowFull
+	}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM escrowed_events`).Scan(&total); err != nil {
+		return err
+	}
+	if total >= EscrowTotalLimit {
 		return ErrEscrowFull
 	}
 	_, err := s.db.Exec(`INSERT INTO escrowed_events (aid, sequence_num, said, raw_b64, cesr_signature, received_at) VALUES (?,?,?,?,?,?)

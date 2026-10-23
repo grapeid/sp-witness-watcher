@@ -235,3 +235,16 @@ func TestTheTipIsKeptNotReadFromTheLog(t *testing.T) {
 		t.Fatalf("the tip kept is %d %s", tip, said)
 	}
 }
+
+// Held back events are capped across every identity, not only per identity.
+func TestTheEscrowIsCappedOverall(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	for i := 0; i < EscrowTotalLimit; i++ {
+		st.db.Exec(`INSERT INTO escrowed_events (aid, sequence_num, said, raw_b64, cesr_signature, received_at) VALUES (?,?,?,?,?,?)`,
+			fmt.Sprintf("E%d", i), 1, fmt.Sprintf("S%d", i), "cmF3", "sig", time.Now().UTC().Format(time.RFC3339))
+	}
+	if err := st.EscrowEvent("ENew", 3, "Enew", "cmF3", "sig"); err != ErrEscrowFull {
+		t.Fatalf("past the overall cap: %v", err)
+	}
+}

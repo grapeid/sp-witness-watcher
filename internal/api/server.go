@@ -208,6 +208,11 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch err := eventBelongsHere(rawEvent, events); {
+	case (errors.Is(err, errNoPredecessor) || errors.Is(err, errNextDisagrees)) && len(events) == 0:
+		// Nothing held back for an identity this witness holds nothing of:
+		// its controller sends its inception first.
+		writeErr(w, http.StatusBadRequest, "this witness holds no inception for this identity; send the log from its inception")
+		return
 	case errors.Is(err, errNoPredecessor), errors.Is(err, errNextDisagrees):
 		// Held back rather than refused: an event whose predecessor has not
 		// arrived waits for it, and one that disagrees with what is held after

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	keri "github.com/grapeid/keri-go"
 	"net/http"
 	"net/http/httptest"
@@ -303,5 +304,41 @@ func TestAStrangersEventsTakeNoEscrowAndRecordNoConflict(t *testing.T) {
 	}
 	if rec := postEvent(t, router, c.aid, two, c.priv); rec.Code != http.StatusOK {
 		t.Fatalf("the genuine event: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The reviewer's flood: somebody without the identity's key sends it
+// well-formed events. None is held back, and the identity's own event that
+// arrives before its predecessor still is.
+func TestAnEscrowCannotBeFloodedWithoutTheKey(t *testing.T) {
+	router, _ := hexWorld(t)
+	alice := newController(t)
+	if rec := postEvent(t, router, alice.aid, alice.log[0], alice.priv); rec.Code != http.StatusOK {
+		t.Fatalf("inception: %d %s", rec.Code, rec.Body.String())
+	}
+	_, mallory, _ := ed25519.GenerateKey(nil)
+	for i := 0; i < 70; i++ {
+		seal := json.RawMessage(fmt.Sprintf(`{"d":"Ejunk%04d"}`, i))
+		raw, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: alice.aid, PriorSAID: "Eunknownprior", SN: 5, Data: []json.RawMessage{seal}})
+		if rec := postEvent(t, router, alice.aid, raw, mallory); rec.Code == http.StatusAccepted {
+			t.Fatal("an event its controller never signed was held back")
+		}
+	}
+	alice.interact(t)
+	alice.interact(t)
+	if rec := postEvent(t, router, alice.aid, alice.log[2], alice.priv); rec.Code != http.StatusAccepted {
+		t.Fatalf("alice's own event before its predecessor was answered %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Nothing is held back for an identity whose inception this witness does not
+// hold.
+func TestNothingIsHeldBackForAnUnknownIdentity(t *testing.T) {
+	router, _ := hexWorld(t)
+	c := newController(t)
+	c.interact(t)
+	two := c.interact(t)
+	if rec := postEvent(t, router, c.aid, two, c.priv); rec.Code == http.StatusAccepted {
+		t.Fatal("an event was held back for an identity with no inception here")
 	}
 }
