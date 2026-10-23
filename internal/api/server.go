@@ -196,7 +196,28 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 	// this anybody could plant an inception, under an identifier no witness
 	// holds yet, that its real controller never made.
 	events, _ := s.Store.GetKELEvents(req.AID)
-	if err := eventBelongsHere(rawEvent, events); err != nil {
+	switch err := eventBelongsHere(rawEvent, events); {
+	case errors.Is(err, errNoPredecessor), errors.Is(err, errNextDisagrees):
+		// Held back rather than refused: an event whose predecessor has not
+		// arrived waits for it, and one that disagrees with what is held after
+		// it waits too, with the disagreement recorded.
+		if errors.Is(err, errNextDisagrees) {
+			s.Store.RecordConflict(req.AID, seqOrMinus(event), "held-after-names-another", eventSAIDOf(event))
+		}
+		if eerr := s.Store.EscrowEvent(req.AID, seqOrMinus(event), eventSAIDOf(event),
+			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature); eerr != nil {
+			writeErr(w, http.StatusTooManyRequests, eerr.Error())
+			return
+		}
+		status := http.StatusAccepted
+		if errors.Is(err, errNextDisagrees) {
+			status = http.StatusConflict
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]interface{}{"escrowed": true, "reason": err.Error()})
+		return
+	case err != nil:
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -224,6 +245,9 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Events held back for this one are taken up now, in order, each checked
+	// as though it had just arrived.
+	s.promoteEscrowed(req.AID, seq)
 	// A receipt covers the EVENT, and the event names itself: its `d` is a
 	// digest of its own contents, so a signature over that identifier is a
 	// signature over the event and nothing else.
@@ -439,4 +463,62 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func seqOrMinus(event map[string]interface{}) int {
+	if n, ok := eventSeqOf(event); ok {
+		return n
+	}
+	return -1
+}
+
+func eventSAIDOf(event map[string]interface{}) string {
+	d, _ := event["d"].(string)
+	return d
+}
+
+// promoteEscrowed takes up, in order from after seq, the events held back
+// waiting for their predecessors, accepting each that now follows what is
+// held and is signed by the key in force, and stopping at the first place
+// none does.
+func (s *Server) promoteEscrowed(aid string, seq int) {
+	for next := seq + 1; ; next++ {
+		waiting, err := s.Store.EscrowedAt(aid, next)
+		if err != nil || len(waiting) == 0 {
+			return
+		}
+		taken := false
+		for _, e := range waiting {
+			raw, err := base64.StdEncoding.DecodeString(e.RawB64)
+			if err != nil {
+				s.Store.DropEscrowed(aid, e.SAID)
+				continue
+			}
+			var event map[string]interface{}
+			if json.Unmarshal(raw, &event) != nil {
+				s.Store.DropEscrowed(aid, e.SAID)
+				continue
+			}
+			held, _ := s.Store.GetKELEvents(aid)
+			if err := eventBelongsHere(raw, held); err != nil {
+				if !errors.Is(err, errNoPredecessor) && !errors.Is(err, errNextDisagrees) {
+					s.Store.DropEscrowed(aid, e.SAID)
+				}
+				continue
+			}
+			if err := verifyControllerSignature(raw, event, e.Signature, held); err != nil {
+				s.Store.DropEscrowed(aid, e.SAID)
+				continue
+			}
+			if _, _, err := s.Store.AcceptEvent(aid, next, event); err != nil {
+				continue
+			}
+			s.Store.DropEscrowed(aid, e.SAID)
+			taken = true
+			break
+		}
+		if !taken {
+			return
+		}
+	}
 }

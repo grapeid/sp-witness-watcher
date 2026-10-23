@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS observations (
     observed_at TEXT NOT NULL,
     PRIMARY KEY (aid, sequence_num)
 );
+-- Events held back because the event before them had not arrived: taken up,
+-- in order, once it does. Bounded per identity, and expired.
+CREATE TABLE IF NOT EXISTS escrowed_events (
+    aid TEXT NOT NULL,
+    sequence_num INTEGER NOT NULL,
+    said TEXT NOT NULL,
+    raw_b64 TEXT NOT NULL,
+    cesr_signature TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    PRIMARY KEY (aid, said)
+);
 -- Every row moved by a repair of sequence numbers, before and after, with a
 -- copy of the row as it was.
 CREATE TABLE IF NOT EXISTS sequence_repairs (

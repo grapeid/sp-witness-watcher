@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/grapeid/sp-witness-watcher/internal/digest"
 )
@@ -190,5 +191,29 @@ func TestFillingAHoleMovesTheTipAndTheLaterDigests(t *testing.T) {
 	st.db.QueryRow(`SELECT COUNT(*) FROM sequence_repairs WHERE aid='EAid' AND kind='digest-recomputed' AND seq_before=3 AND digest_before=? AND digest_after=?`, before, after).Scan(&recorded)
 	if recorded != 1 {
 		t.Fatal("the published digest was overwritten without a record of what it was")
+	}
+}
+
+// Held back events are bounded per identity and expire.
+func TestTheEscrowIsBoundedAndExpires(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	defer st.Close()
+	for i := 0; i < EscrowLimit; i++ {
+		if err := st.EscrowEvent("EAid", 10+i, fmt.Sprintf("E%d", i), "cmF3", "sig"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.EscrowEvent("EAid", 999, "Emore", "cmF3", "sig"); err != ErrEscrowFull {
+		t.Fatalf("past the bound: %v", err)
+	}
+	if err := st.EscrowEvent("EOther", 5, "Eother", "cmF3", "sig"); err != nil {
+		t.Fatalf("another identity is bounded on its own: %v", err)
+	}
+	st.db.Exec(`UPDATE escrowed_events SET received_at = ? WHERE aid = 'EAid'`, time.Now().UTC().Add(-2*EscrowLife).Format(time.RFC3339))
+	if err := st.EscrowEvent("EAid", 999, "Emore", "cmF3", "sig"); err != nil {
+		t.Fatalf("after the held back events expired: %v", err)
+	}
+	if got, _ := st.EscrowedAt("EAid", 10); len(got) != 0 {
+		t.Fatal("an expired event is still held back")
 	}
 }

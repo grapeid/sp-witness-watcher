@@ -123,22 +123,22 @@ func TestTheSameEventAgainIsReceipted(t *testing.T) {
 	}
 }
 
-// An event that does not follow the one held before it is refused: out of
-// order, or naming another prior.
+// An event whose predecessor has not arrived is held back, not refused; one
+// naming another prior than the event held before it is refused.
 func TestAnEventOutOfOrderIsRefused(t *testing.T) {
 	router, _ := hexWorld(t)
 	c := newController(t)
 	postEvent(t, router, c.aid, c.log[0], c.priv)
 	first := c.interact(t)
 	second := c.interact(t)
-	if rec := postEvent(t, router, c.aid, second, c.priv); rec.Code != http.StatusBadRequest {
-		t.Fatalf("an event with the one before it missing was answered %d", rec.Code)
+	if rec := postEvent(t, router, c.aid, second, c.priv); rec.Code != http.StatusAccepted {
+		t.Fatalf("an event with the one before it missing was answered %d, not held back", rec.Code)
 	}
 	if rec := postEvent(t, router, c.aid, first, c.priv); rec.Code != http.StatusOK {
 		t.Fatalf("the next event: %d %s", rec.Code, rec.Body.String())
 	}
 	other := newController(t)
-	stray, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: c.aid, PriorSAID: other.said[0], SN: 2,
+	stray, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: c.aid, PriorSAID: other.said[0], SN: 3,
 		Data: []json.RawMessage{json.RawMessage(`{"d":"` + other.said[0] + `"}`)}})
 	if rec := postEvent(t, router, c.aid, stray, c.priv); rec.Code != http.StatusBadRequest {
 		t.Fatalf("an event naming another prior was answered %d", rec.Code)
@@ -166,5 +166,101 @@ func TestAForgedInceptionIsRefused(t *testing.T) {
 	}
 	if rec := postEvent(t, router, real.aid, real.log[0], real.priv); rec.Code != http.StatusOK {
 		t.Fatalf("the real inception, after the forgeries: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The log an older Identity Agent leaves: events its witnesses never got,
+// then later ones. The later ones are held back, the tip stays below the gap,
+// and once the missing events arrive everything held back is taken up in
+// order.
+func TestALogWithAGapIsTakenUpWhenTheGapFills(t *testing.T) {
+	router, _ := hexWorld(t)
+	c := newController(t)
+	postEvent(t, router, c.aid, c.log[0], c.priv)
+	for i := 0; i < 5; i++ {
+		c.interact(t)
+	}
+	// Events 1 and 2 never sent; 3, 4 and 5 sent.
+	for sn := 3; sn <= 5; sn++ {
+		if rec := postEvent(t, router, c.aid, c.log[sn], c.priv); rec.Code != http.StatusAccepted {
+			t.Fatalf("event %d past a gap was answered %d %s", sn, rec.Code, rec.Body.String())
+		}
+	}
+	tipOf := func() int {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+c.aid+"/tip?nonce=n", nil))
+		var tip struct {
+			SN int `json:"sn"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &tip)
+		return tip.SN
+	}
+	if tip := tipOf(); tip != 0 {
+		t.Fatalf("with a gap the tip is %d", tip)
+	}
+	postEvent(t, router, c.aid, c.log[1], c.priv)
+	if tip := tipOf(); tip != 1 {
+		t.Fatalf("with the gap half filled the tip is %d", tip)
+	}
+	postEvent(t, router, c.aid, c.log[2], c.priv)
+	if tip := tipOf(); tip != 5 {
+		t.Fatalf("with the gap filled the tip is %d, not the last held back", tip)
+	}
+}
+
+// An event held back with a signature that does not hold is not taken up.
+func TestAnEventHeldBackIsCheckedWhenTakenUp(t *testing.T) {
+	router, _ := hexWorld(t)
+	c := newController(t)
+	postEvent(t, router, c.aid, c.log[0], c.priv)
+	one, two := c.interact(t), c.interact(t)
+	_, other, _ := ed25519.GenerateKey(nil)
+	if rec := postEvent(t, router, c.aid, two, other); rec.Code != http.StatusAccepted {
+		t.Fatalf("held back: %d", rec.Code)
+	}
+	postEvent(t, router, c.aid, one, c.priv)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/witness/kel/"+c.aid+"/tip?nonce=n", nil))
+	if !strings.Contains(rec.Body.String(), `"sn":1`) {
+		t.Fatalf("an event held back with a signature that does not hold was taken up: %s", rec.Body.String())
+	}
+}
+
+// Filling a place left empty under an event already held: the new event must
+// be the one that event names before it, or it is another history there. It
+// is held back and the conflict recorded; the right one fills the place.
+func TestFillingAGapMustAgreeWithWhatFollows(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	id, _ := signer.LoadOrCreate(filepath.Join(dir, "id"))
+	router := New(st, id).Router()
+	c := newController(t)
+	postEvent(t, router, c.aid, c.log[0], c.priv)
+	one, two, three := c.interact(t), c.interact(t), c.interact(t)
+	postEvent(t, router, c.aid, one, c.priv)
+	// As an older witness left it: event 3 held, event 2 missing.
+	var parsed map[string]interface{}
+	json.Unmarshal(three, &parsed)
+	if _, _, err := st.AcceptEvent(c.aid, 3, parsed); err != nil {
+		t.Fatal(err)
+	}
+	other, _ := keri.BuildInteraction(keri.InteractionInput{Prefix: c.aid, PriorSAID: c.said[1], SN: 2,
+		Data: []json.RawMessage{json.RawMessage(`{"d":"` + c.said[1] + `","other":"history"}`)}})
+	if rec := postEvent(t, router, c.aid, other, c.priv); rec.Code != http.StatusConflict {
+		t.Fatalf("an event disagreeing with what follows it was answered %d %s", rec.Code, rec.Body.String())
+	}
+	if found, _ := st.RepairSequences(false); len(found) != 1 || found[0].Conflicts != 1 {
+		t.Fatalf("the disagreement was not recorded: %+v", found)
+	}
+	if rec := postEvent(t, router, c.aid, two, c.priv); rec.Code != http.StatusOK {
+		t.Fatalf("the event what follows names: %d %s", rec.Code, rec.Body.String())
+	}
+	events, _ := st.GetKELEvents(c.aid)
+	if len(events) != 4 {
+		t.Fatalf("%d events held", len(events))
 	}
 }

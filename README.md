@@ -51,6 +51,14 @@ from where it thinks the witness stopped; a different event at a held place is
 a conflict. An event that fills a place left empty recomputes every later
 rolling digest.
 
+An event is accepted only if it is what it says it is: well formed, digesting
+to its own identifier, an inception deriving its identity's identifier, and any
+later event naming as its prior the event held one place before it. An event
+whose predecessor has not arrived is held back (at most 64 per identity, for at
+most 24 hours) and taken up, checked again, once the predecessor arrives. An
+event filling a place left empty must be the one the event held after it names
+as its prior; one that is not is held back and the disagreement recorded.
+
 ### Repairing events stored before sequence numbers were read as hex
 
 A witness that stored events while it read sequence numbers as decimal holds
