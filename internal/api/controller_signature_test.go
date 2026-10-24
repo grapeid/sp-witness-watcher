@@ -43,7 +43,7 @@ func signedEvent(t *testing.T) (raw []byte, parsed map[string]interface{}, sig s
 // The ordinary case: an event signed by the key it declares.
 func TestAnEventSignedByItsOwnKeyIsAccepted(t *testing.T) {
 	raw, parsed, sig, _ := signedEvent(t)
-	if err := verifyControllerSignature(raw, parsed, sig, nil); err != nil {
+	if err := verifyControllerSignature(raw, parsed, sig, nil, nil); err != nil {
 		t.Fatalf("a correctly signed event was refused: %v", err)
 	}
 }
@@ -52,7 +52,7 @@ func TestAnEventSignedByItsOwnKeyIsAccepted(t *testing.T) {
 // anybody, and its receipts stop separating a real history from an invented one.
 func TestAnEventSignedByAStrangerIsRefused(t *testing.T) {
 	raw, parsed, _, other := signedEvent(t)
-	if err := verifyControllerSignature(raw, parsed, cesrSig(ed25519.Sign(other, raw)), nil); err == nil {
+	if err := verifyControllerSignature(raw, parsed, cesrSig(ed25519.Sign(other, raw)), nil, nil); err == nil {
 		t.Fatal("an event signed by a key it does not declare was accepted for witnessing")
 	}
 }
@@ -62,7 +62,7 @@ func TestATamperedEventIsRefused(t *testing.T) {
 	raw, parsed, sig, _ := signedEvent(t)
 	tampered := append([]byte(nil), raw...)
 	tampered[len(tampered)-3] ^= 0x01
-	if err := verifyControllerSignature(tampered, parsed, sig, nil); err == nil {
+	if err := verifyControllerSignature(tampered, parsed, sig, nil, nil); err == nil {
 		t.Fatal("an altered event was accepted for witnessing")
 	}
 }
@@ -89,13 +89,13 @@ func TestAnInteractionIsCheckedAgainstTheStoredKeyState(t *testing.T) {
 	}
 
 	prior := []map[string]interface{}{icp}
-	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(ed25519.Sign(priv, ixnRaw)), prior); err != nil {
+	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(ed25519.Sign(priv, ixnRaw)), prior, nil); err != nil {
 		t.Fatalf("an interaction signed by the key in force was refused: %v", err)
 	}
 
 	// And a stranger still cannot anchor against somebody else's key state.
 	_, otherPriv, _ := ed25519.GenerateKey(nil)
-	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(ed25519.Sign(otherPriv, ixnRaw)), prior); err == nil {
+	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(ed25519.Sign(otherPriv, ixnRaw)), prior, nil); err == nil {
 		t.Fatal("an interaction signed by a stranger was accepted")
 	}
 }
@@ -108,7 +108,7 @@ func TestAnInteractionWithNoKnownKeyStateIsRefused(t *testing.T) {
 	if err := json.Unmarshal(ixnRaw, &ixn); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(make([]byte, 64)), nil); err == nil {
+	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(make([]byte, 64)), nil, nil); err == nil {
 		t.Fatal("an interaction was attested to with no key state to check it against")
 	}
 }
@@ -122,10 +122,10 @@ func TestTheParsedOnlyFormIsRefused(t *testing.T) {
 	}
 }
 
-// A rotation is refused until pre-rotation commitment checking exists, rather
-// than trusted on the strength of its own declared key. Trusting it would let
-// anyone who can reach the witness rotate anyone's key state.
-func TestARotationIsRefusedUntilItCanBeValidated(t *testing.T) {
+// A rotation is never trusted on the strength of its own declared key, which
+// would let anyone who can reach the witness rotate anyone's key state. With no
+// log to check its commitment against, it is refused.
+func TestARotationWithNoLogToCheckIsRefused(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestARotationIsRefusedUntilItCanBeValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Even signed by the key it declares, it must not be accepted.
-	if err := verifyControllerSignature(rotRaw, rot, cesrSig(ed25519.Sign(priv, rotRaw)), nil); err == nil {
+	if err := verifyControllerSignature(rotRaw, rot, cesrSig(ed25519.Sign(priv, rotRaw)), nil, nil); err == nil {
 		t.Fatal("a rotation was attested to without pre-rotation validation")
 	}
 }
@@ -150,9 +150,8 @@ func TestKeyStateIsResolvedAtTheEventsSequence(t *testing.T) {
 
 	var icp, laterEstablishment map[string]interface{}
 	json.Unmarshal([]byte(`{"t":"icp","d":"EAAAicp","i":"EAAAicp","s":"0","k":["`+qb64Key(k0pub)+`"]}`), &icp)
-	// A second establishment event at s=5 under a different key. (This witness
-	// would not actually accept it today — it is a rot — but signingKeyFor must
-	// still resolve correctly around it when it is already on file.)
+	// A second establishment event at s=5 under a different key, already on
+	// file: signingKeyFor must resolve correctly around it.
 	json.Unmarshal([]byte(`{"t":"rot","d":"EAAArot","i":"EAAAicp","s":"5","k":["`+qb64Key(k1pub)+`"]}`), &laterEstablishment)
 	prior := []map[string]interface{}{icp, laterEstablishment}
 
@@ -160,7 +159,7 @@ func TestKeyStateIsResolvedAtTheEventsSequence(t *testing.T) {
 	ixnRaw := []byte(`{"t":"ixn","d":"EAAAixn2","i":"EAAAicp","s":"2"}`)
 	var ixn map[string]interface{}
 	json.Unmarshal(ixnRaw, &ixn)
-	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(ed25519.Sign(k0priv, ixnRaw)), prior); err != nil {
+	if err := verifyControllerSignature(ixnRaw, ixn, cesrSig(ed25519.Sign(k0priv, ixnRaw)), prior, nil); err != nil {
 		t.Fatalf("an interaction at s=2 was not checked against the key in force at s=2: %v", err)
 	}
 }

@@ -2,7 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -161,6 +163,49 @@ func (s *ServiceStore) EventAt(aid string, sn int) (rawB64, sig string, ok bool,
 		return "", "", false, err
 	}
 	return rawB64, sig, rawB64 != "" && sig != "", nil
+}
+
+// PublishedLogBefore is aid's log from its inception up to, but not including,
+// sn, as its controller published each event, in order.
+//
+// It is all or nothing. A place below sn that is not held, or an event held
+// before witnesses kept the bytes, makes it an error rather than a shorter
+// log: what the caller checks against it (a rotation's commitment) is only
+// sound against the whole history, and a log with a hole in it would answer a
+// narrower question than the one asked.
+func (s *ServiceStore) PublishedLogBefore(aid string, sn int) ([][]byte, error) {
+	rows, err := s.db.Query(`SELECT sequence_num, raw_b64 FROM kel_events WHERE aid=? AND sequence_num>=0 AND sequence_num<? ORDER BY sequence_num`, aid, sn)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([][]byte, 0, sn)
+	for rows.Next() {
+		var at int
+		var rawB64 string
+		if err := rows.Scan(&at, &rawB64); err != nil {
+			return nil, err
+		}
+		if at != len(out) {
+			return nil, fmt.Errorf("this witness does not hold place %d of the log", len(out))
+		}
+		if rawB64 == "" {
+			return nil, fmt.Errorf("this witness holds place %d of the log without the bytes it "+
+				"was published as", at)
+		}
+		raw, err := base64.StdEncoding.DecodeString(rawB64)
+		if err != nil {
+			return nil, fmt.Errorf("place %d of the log is held unreadably: %w", at, err)
+		}
+		out = append(out, raw)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) != sn {
+		return nil, fmt.Errorf("this witness does not hold place %d of the log", len(out))
+	}
+	return out, nil
 }
 
 func (s *ServiceStore) Enroll(aid, controllerAID string) error {
