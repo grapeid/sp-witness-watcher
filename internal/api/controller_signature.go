@@ -21,8 +21,6 @@ import (
 // rules out is somebody submitting events under an identity whose keys they do
 // not hold.
 
-// verifyControllerSignature checks a CESR signature over an event's canonical
-// bytes against the key the event itself declares.
 // isEstablishment reports whether an event sets the key state rather than
 // inheriting it. Only these carry a `k` field of their own.
 func isEstablishment(event map[string]interface{}) bool {
@@ -60,21 +58,18 @@ func eventSeqOf(event map[string]interface{}) (int, bool) {
 // before a rotation would be checked against the post-rotation key and
 // wrongly refused, and a gap could let the wrong key through.
 //
-// Rotation (rot/drt) is deliberately NOT accepted here. Validating one means
-// checking the new keys against the prior event's pre-rotation commitment (its
-// `n` digests), which is exact-serialisation KERI work this service does not
-// yet do — and trusting a rotation's own declared key without that check lets
-// anyone who can reach the witness rotate anyone's key state, since the rot
-// would verify against the very key the attacker chose. Until that validation
-// exists it fails closed: a witness that cannot yet witness a rotation is a
-// liveness limit; one that lets anyone rotate anyone is a hole.
+// A rotation (rot/drt) has no single key to return: its own keys are the ones
+// whoever wrote it chose, so trusting them would let anyone who can reach the
+// witness rotate anyone's key state. It is checked against the commitment the
+// identity made earlier instead, by verifyRotation, and refused here so that
+// nothing can reach this function with one and come away with a key.
 func signingKeyFor(event map[string]interface{}, prior []map[string]interface{}) (ed25519.PublicKey, error) {
 	switch t, _ := event["t"].(string); t {
 	case "icp", "dip":
 		return signingKeyOf(event)
 	case "rot", "drt":
-		return nil, fmt.Errorf("this witness cannot yet validate a rotation (pre-rotation " +
-			"commitment checking is not implemented), so it will not attest to one")
+		return nil, fmt.Errorf("a rotation is checked against the identity's commitment to its " +
+			"next keys, not against a key it declares")
 	}
 
 	seq, ok := eventSeqOf(event)
@@ -94,7 +89,16 @@ func signingKeyFor(event map[string]interface{}, prior []map[string]interface{})
 		"witness holds none at an earlier sequence for that identity — submit the inception first")
 }
 
-func verifyControllerSignature(raw []byte, event map[string]interface{}, cesrSig string, prior []map[string]interface{}) error {
+// verifyControllerSignature checks that the identity an event claims to come
+// from authorised it: an inception against its own key, an interaction against
+// the key in force at its place in the log, and a rotation against the
+// commitment the identity made to its next keys, using the log before it as
+// published.
+func verifyControllerSignature(raw []byte, event map[string]interface{}, cesrSig string, prior []map[string]interface{}, published publishedLog) error {
+	switch t, _ := event["t"].(string); t {
+	case "rot", "drt":
+		return verifyRotation(raw, cesrSig, published)
+	}
 	key, err := signingKeyFor(event, prior)
 	if err != nil {
 		return err

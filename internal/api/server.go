@@ -204,7 +204,7 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 	// whose signing key cannot be shown from what is held, such as one past a
 	// gap that held a rotation, is refused, and its controller sends again in
 	// order.
-	if err := verifyControllerSignature(rawEvent, event, req.CesrSignature, events); err != nil {
+	if err := verifyControllerSignature(rawEvent, event, req.CesrSignature, events, s.publishedLog(req.AID)); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -504,6 +504,12 @@ func eventSAIDOf(event map[string]interface{}) string {
 	return d
 }
 
+// publishedLog reads an identity's log as this witness holds it published,
+// which is what a rotation is checked against.
+func (s *Server) publishedLog(aid string) publishedLog {
+	return func(sn int) ([][]byte, error) { return s.Store.PublishedLogBefore(aid, sn) }
+}
+
 // promoteEscrowed takes up, in order from after seq, the events held back
 // waiting for their predecessors, accepting each that now follows what is
 // held and is signed by the key in force, and stopping at the first place
@@ -533,7 +539,7 @@ func (s *Server) promoteEscrowed(aid string, seq int) {
 				}
 				continue
 			}
-			if err := verifyControllerSignature(raw, event, e.Signature, held); err != nil {
+			if err := verifyControllerSignature(raw, event, e.Signature, held, s.publishedLog(aid)); err != nil {
 				s.Store.DropEscrowed(aid, e.SAID)
 				continue
 			}

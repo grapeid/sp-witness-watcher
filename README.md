@@ -103,8 +103,13 @@ its whole log.
 
 `POST /witness/event` requires the event's published bytes (`event_b64`) and the
 controller's signature over them (`cesr_signature`). Nothing is stored or
-receipted unverified. Rotation events are refused until pre-rotation commitments
-are validated. Write and read paths are rate limited per client IP.
+receipted unverified. A rotation (`rot`, or `drt` for a delegated identity) is
+witnessed only when the whole log before it is held as published, its keys
+digest to those the previous establishment event committed to, and its one
+signature meets both its own signing threshold and the previous event's
+next-key threshold. One that needs more than one signature is refused, because
+an event carries one signature here. Write and read paths are rate limited per
+client IP.
 
 ## Build and run
 
