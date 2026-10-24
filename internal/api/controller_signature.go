@@ -116,11 +116,9 @@ func verifyControllerSignature(raw []byte, event map[string]interface{}, cesrSig
 
 // signingKeyOf returns the verifying key an event declares.
 //
-// An establishment event carries its own keys; anything else is signed by
-// whatever is currently in force, which a witness holding no prior state cannot
-// resolve. Those are accepted without a signature check rather than refused,
-// because refusing them would make a witness useless for interactions — and the
-// response records which of the two happened.
+// An establishment event carries its own keys, and its first is the one read.
+// Anything else is signed by whatever is in force, which signingKeyFor
+// resolves from the held log before calling this.
 func signingKeyOf(event map[string]interface{}) (ed25519.PublicKey, error) {
 	keys, ok := event["k"].([]interface{})
 	if !ok || len(keys) == 0 {

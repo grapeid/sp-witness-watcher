@@ -202,13 +202,17 @@ func TestARotationUnderThePriorNextThresholdIsRefused(t *testing.T) {
 	}
 }
 
-// Any committed key can be the one that signs, not only the first.
-func TestARotationSignedByItsSecondKeyIsWitnessed(t *testing.T) {
+// A rotation signed by a key other than its first is refused for now: what
+// follows it is checked against its first key, so witnessing it would leave its
+// controller's next interaction refused.
+func TestARotationSignedByItsSecondKeyIsRefused(t *testing.T) {
 	router, _ := hexWorld(t)
 	b, c := newKeyPair(t), newKeyPair(t)
 	aid, said := incept(t, router, "1", b, c)
-	wantStatus(t, postEvent(t, router, aid, rotation(t, aid, said, "1", b, c), c.priv), 200,
+	wantStatus(t, postEvent(t, router, aid, rotation(t, aid, said, "1", b, c), c.priv), 400,
 		"a rotation signed by its second key")
+	wantStatus(t, postEvent(t, router, aid, rotation(t, aid, said, "1", b, c), b.priv), 200,
+		"the same rotation signed by its first key")
 }
 
 // A delegated identity rotates under the same rule: its own commitment.
@@ -256,4 +260,70 @@ func TestARotationPastAGapIsRefused(t *testing.T) {
 	}
 	rec := postEvent(t, router, aid, rot, next.priv)
 	wantStatus(t, rec, 400, "a rotation past a gap")
+	if !strings.Contains(rec.Body.String(), "does not hold place 1") {
+		t.Fatalf("the refusal does not say why: %s", rec.Body.String())
+	}
+}
+
+// rotate builds a rotation at sn, after prior, to keys, committing to next.
+func rotate(t *testing.T, aid, prior string, sn int, keys []keyPair, next ...keyPair) ([]byte, string) {
+	t.Helper()
+	raw, err := keri.BuildRotation(keri.RotationInput{
+		Prefix: aid, PriorSAID: prior, SN: sn, Keys: pubs(keys...), NextDigests: digs(next...),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, _ := keri.ParseEvent(raw)
+	return raw, ev.SAID
+}
+
+func interact(t *testing.T, aid, prior string, sn int) ([]byte, string) {
+	t.Helper()
+	raw, err := keri.BuildInteraction(keri.InteractionInput{Prefix: aid, PriorSAID: prior, SN: sn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, _ := keri.ParseEvent(raw)
+	return raw, ev.SAID
+}
+
+// A rotation after an interaction, and a rotation after a rotation, are each
+// checked against the newest establishment event's commitment, not the
+// inception's, and what follows each is checked against its key.
+func TestRotationsInSuccessionEachKeepTheirCommitment(t *testing.T) {
+	router, _ := hexWorld(t)
+	b, c, d := newKeyPair(t), newKeyPair(t), newKeyPair(t)
+	aid, said := incept(t, router, "1", b)
+
+	ixn1, _ := interact(t, aid, said, 1)
+	wantStatus(t, postEvent(t, router, aid, ixn1, b.priv), 400, "an interaction signed by a key not yet in force")
+	rot2, s2 := rotate(t, aid, said, 1, []keyPair{b}, c)
+	wantStatus(t, postEvent(t, router, aid, rot2, b.priv), 200, "the first rotation")
+	ixn3, s3 := interact(t, aid, s2, 2)
+	wantStatus(t, postEvent(t, router, aid, ixn3, b.priv), 200, "the interaction after the first rotation")
+
+	// b was committed to by the inception, not by the first rotation, so it
+	// cannot be rotated to again.
+	again, _ := rotate(t, aid, s3, 3, []keyPair{b}, d)
+	wantStatus(t, postEvent(t, router, aid, again, b.priv), 400, "a rotation to a key the newest commitment does not cover")
+	rot4, s4 := rotate(t, aid, s3, 3, []keyPair{c}, d)
+	wantStatus(t, postEvent(t, router, aid, rot4, c.priv), 200, "the second rotation, after an interaction")
+	ixn5, _ := interact(t, aid, s4, 4)
+	wantStatus(t, postEvent(t, router, aid, ixn5, c.priv), 200, "the interaction after the second rotation")
+}
+
+// A second rotation at a place already held, validly signed, is another history
+// at that place: recorded as a conflict, not taken.
+func TestASecondRotationAtAHeldPlaceIsAConflict(t *testing.T) {
+	router, _ := hexWorld(t)
+	b, c := newKeyPair(t), newKeyPair(t)
+	aid, said := incept(t, router, "1", b, c)
+	first, _ := rotate(t, aid, said, 1, []keyPair{b}, newKeyPair(t))
+	wantStatus(t, postEvent(t, router, aid, first, b.priv), 200, "the first rotation")
+	other, _ := rotate(t, aid, said, 1, []keyPair{c}, newKeyPair(t))
+	wantStatus(t, postEvent(t, router, aid, other, c.priv), 409, "another rotation at the same place")
+	if sn := tipOf(t, router, aid); sn != 1 {
+		t.Fatalf("the held log moved to %d", sn)
+	}
 }

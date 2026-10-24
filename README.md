@@ -106,10 +106,15 @@ controller's signature over them (`cesr_signature`). Nothing is stored or
 receipted unverified. A rotation (`rot`, or `drt` for a delegated identity) is
 witnessed only when the whole log before it is held as published, its keys
 digest to those the previous establishment event committed to, and its one
-signature meets both its own signing threshold and the previous event's
-next-key threshold. One that needs more than one signature is refused, because
-an event carries one signature here. Write and read paths are rate limited per
-client IP.
+signature, by its first key, meets both its own signing threshold and the
+previous event's next-key threshold. Refused for now, each failing closed: a
+rotation needing more than one signature or signed by another key (an event
+carries one signature here), a weighted next-key threshold, keys the previous
+event did not commit to, a log held from before witnesses kept published
+bytes, and a recovery rotation replacing interactions already held. A
+delegated rotation is not checked against its delegator's approval, as a
+delegated inception is not. Write and read paths are rate limited per client
+IP.
 
 ## Build and run
 

@@ -18,7 +18,7 @@ import (
 // digests of the keys that will come next (its `n`), never the keys, so only
 // whoever generated those keys can present ones that match.
 //
-// A rotation is witnessed when all of this holds, as KERI requires:
+// A rotation is witnessed when all of this holds:
 //   - it is a valid next event in the log this witness holds, from the
 //     inception on: its sequence number follows, it names the event before it,
 //     and every key it presents digests to one the previous establishment event
@@ -32,10 +32,15 @@ import (
 // `nt` only against which keys a rotation PRESENTS, not which of them SIGNED.
 // For the single signature an event carries to this witness that comes down to
 // two facts: the signing key is one that was committed to, and one committed
-// key is enough. Anything needing more than one signature is refused: this
+// key is enough. That signature must also be by the rotation's first key, the
+// key everything after it is checked against. Anything needing more than one signature is refused: this
 // witness takes one signature per event, so it cannot see such a threshold
 // met, and a witness that receipted it anyway would attest to a rotation the
 // identity's own rules do not authorise.
+//
+// Not checked: that a delegated rotation (drt) is anchored by its delegator,
+// which KERI also requires. A delegated inception is not checked for it either;
+// both wait on the witness holding the delegator's log.
 
 // publishedLog returns an identity's log before sn, as published.
 type publishedLog func(sn int) ([][]byte, error)
@@ -66,16 +71,16 @@ func verifyRotation(raw []byte, cesrSig string, published publishedLog) error {
 	if err != nil {
 		return err
 	}
-	signer := -1
-	for i, k := range ev.Keys {
-		if keri.VerifySignature(k, raw, sig) == nil {
-			signer = i
-			break
-		}
-	}
-	if signer < 0 {
-		return fmt.Errorf("the rotation is not signed by any of the keys it rotates to, so " +
-			"whoever sent it does not hold the identity's next keys")
+	// The signature must be by the first key. Everything after a rotation is
+	// checked against the first key in force (signingKeyOf), and so is the
+	// rotation itself in the Identity Agent core's own log check; accepting a
+	// rotation signed by another key would witness a log that its controller's
+	// next interaction, and the core, then refuse. Signatures by other keys
+	// come with indexed signature lists, which this witness does not take yet.
+	const signer = 0
+	if len(ev.Keys) == 0 || keri.VerifySignature(ev.Keys[signer], raw, sig) != nil {
+		return fmt.Errorf("the rotation is not signed by the first of the keys it rotates to, " +
+			"so whoever sent it has not been shown to hold the identity's next keys")
 	}
 
 	// The rotation's own threshold, by the library, from the signature as an
@@ -98,6 +103,10 @@ func verifyRotation(raw []byte, cesrSig string, published publishedLog) error {
 	if err != nil {
 		return fmt.Errorf("the signing key cannot be digested: %w", err)
 	}
+	// keri.ValidateKEL already refuses any presented key the commitment does
+	// not cover. Checked again here because this rule is what the threshold
+	// check below rests on, and it must not depend on the library staying that
+	// strict (KERI itself allows a rotation to add keys nobody committed to).
 	found := false
 	for _, d := range committed {
 		if d == digest {
@@ -124,6 +133,9 @@ func verifyRotation(raw []byte, cesrSig string, published publishedLog) error {
 // The unindexed form a controller sends ("0B" then 86 characters) and the
 // indexed one ("A", one character of index, then the same 86) differ only in
 // that two-character code, because both encode 64 bytes behind two pad bytes.
+// The index is the key's place in this rotation's `k`; it is used only to check
+// this rotation's own threshold and never leaves the witness, so it says
+// nothing about the key's place in the previous event's `n`.
 func withIndexedSignature(raw []byte, index int, cesrSig string) ([]byte, error) {
 	const b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 	if index < 0 || index >= len(b64) {
@@ -133,12 +145,11 @@ func withIndexedSignature(raw []byte, index int, cesrSig string) ([]byte, error)
 	if len(cesrSig) != 88 || cesrSig[:2] != "0B" {
 		return nil, fmt.Errorf("the controller signature is not a CESR Ed25519 signature")
 	}
-	out := make([]byte, 0, len(raw)+4+88)
-	out = append(out, raw...)
-	out = append(out, "-AAB"...)
-	out = append(out, 'A', b64[index])
-	out = append(out, cesrSig[2:]...)
-	return out, nil
+	group, err := keri.AttachControllerSigs([]string{"A" + string(b64[index]) + cesrSig[2:]})
+	if err != nil {
+		return nil, err
+	}
+	return append(append([]byte(nil), raw...), group...), nil
 }
 
 // priorCommitment is the next-key digests and their threshold from the newest
@@ -164,8 +175,8 @@ func priorCommitment(log [][]byte) (digests []string, nt string, err error) {
 }
 
 // oneSignatureMeets reports whether a single committed key signing satisfies a
-// next-key threshold, as it appears in the event: a hexadecimal count of at
-// most one. A weighted threshold is answered no, which refuses rather than
+// next-key threshold, as it appears in the event: a hexadecimal count of
+// exactly one. Zero is no, because a threshold of zero commits to no next keys. A weighted threshold is answered no, which refuses rather than
 // guesses; reading weights belongs in the KERI library, not here.
 func oneSignatureMeets(nt string) bool {
 	var count string
@@ -173,5 +184,5 @@ func oneSignatureMeets(nt string) bool {
 		return false // absent, or weighted (a list)
 	}
 	n, err := strconv.ParseUint(count, 16, 32)
-	return err == nil && n <= 1
+	return err == nil && n == 1
 }
