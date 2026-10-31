@@ -38,9 +38,11 @@ func TestADigestIsNotAnEventsKey(t *testing.T) {
 // 2 are in the next character. Unchecked, every key had four spellings.
 func TestAKeyWithLeadBitsIsRefused(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	raw, parsed := icpDeclaring(t, flipChar(qb64Key(pub), 1, 0x10))
-	if err := verifyControllerSignature(raw, parsed, cesrSig(ed25519.Sign(priv, raw)), nil, nil); err == nil {
-		t.Fatal("a key whose lead bits are not zero was read as the key")
+	for _, bits := range []int{0x10, 0x20, 0x30} {
+		raw, parsed := icpDeclaring(t, flipChar(qb64Key(pub), 1, bits))
+		if err := verifyControllerSignature(raw, parsed, cesrSig(ed25519.Sign(priv, raw)), nil, nil); err == nil {
+			t.Fatalf("a key with lead bits %x was read as the key", bits)
+		}
 	}
 }
 

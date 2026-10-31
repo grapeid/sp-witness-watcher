@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -100,16 +99,4 @@ func (id *Identity) CESRSignature(payload []byte) string {
 func (id *Identity) Sign(payload []byte) string {
 	sig := ed25519.Sign(id.PrivateKey, payload)
 	return base64.RawURLEncoding.EncodeToString(sig)
-}
-
-// Verify checks an ed25519 signature.
-func Verify(pub ed25519.PublicKey, payload []byte, sigB64 string) error {
-	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(pub, payload, sig) {
-		return fmt.Errorf("invalid signature")
-	}
-	return nil
 }
