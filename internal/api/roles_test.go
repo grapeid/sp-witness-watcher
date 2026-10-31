@@ -4,9 +4,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
-	"github.com/grapeid/sp-witness-watcher/internal/signer"
+	"github.com/grapeid/sp-common/sign"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
 
@@ -48,7 +49,7 @@ func TestDisabledRoleRoutesAreNotServed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	id, err := signer.LoadOrCreate(dir)
+	id, err := sign.LoadOrCreateIdentity(filepath.Join(dir, "service_identity.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

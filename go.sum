@@ -1,3 +1,5 @@
+github.com/LF-Decentralized-Trust-labs/identity-bot/identity-agent-core/relayproto v0.0.0-20261022154728-134689791b1a h1:lQhzZGi6Oh335wgje4UwXUuLLunNIJz5HGdeatCn/ms=
+github.com/LF-Decentralized-Trust-labs/identity-bot/identity-agent-core/relayproto v0.0.0-20261022154728-134689791b1a/go.mod h1:SyJvK6o5aYufFS56KL5hJBBXjJZSGnjMppgifgazsIw=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/go-chi/chi/v5 v5.2.5 h1:Eg4myHZBjyvJmAFjFvWgrqDTXFyOzjj7YIm3L3mu6Ug=
@@ -6,12 +8,16 @@ github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e h1:ijClszYn+mADRFY17k
 github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e/go.mod h1:boTsfXsheKC2y+lKOCMpSfarhxDeIzfZG1jqGcPl3cA=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/grapeid/keri-go v0.1.5 h1:/HCHgbQbJ+HP/cHIe0DyxLXMnBC8gK3Z2sz0rseltGA=
 github.com/grapeid/keri-go v0.1.5/go.mod h1:Gypsr09J5eYiw9vpimQrE8nn9UolBOv0HkkrdNynLYg=
-github.com/grapeid/sp-common v0.0.0-20261031044116-ebcd35babcc8 h1:5x+net0nHqIV77VnZOwOr8AZLkG/czutIfYTVGuRJWg=
-github.com/grapeid/sp-common v0.0.0-20261031044116-ebcd35babcc8/go.mod h1:uWr9oNdbmNyWfB7DKPTKW1qPEN5bAolhHn522BOlFNk=
+github.com/grapeid/sp-common v0.0.0-20261031190650-7c49048b2283 h1:e1EzXn/W+qn5lPOHIUmC4K2XvN6rPeYPCsWc6zs7ZDQ=
+github.com/grapeid/sp-common v0.0.0-20261031190650-7c49048b2283/go.mod h1:uWr9oNdbmNyWfB7DKPTKW1qPEN5bAolhHn522BOlFNk=
 github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs4luLUK2k=
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
+github.com/hashicorp/yamux v0.1.2 h1:XtB8kyFOyHXYVFnwT5C3+Bdo8gArse7j2AQ0DA0Uey8=
+github.com/hashicorp/yamux v0.1.2/go.mod h1:C+zze2n6e/7wshOZep2A70/aQU6QBRWJO/G6FT1wIns=
 github.com/klauspost/cpuid/v2 v2.0.12 h1:p9dKCg8i4gmOxtv35DvrYoWqYzQrvEVdjQ762Y0OqZE=
 github.com/klauspost/cpuid/v2 v2.0.12/go.mod h1:g2LTdtYhdyuGPqyWyv7qRAmj1WBqxuObKfj5c0PQa7c=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=

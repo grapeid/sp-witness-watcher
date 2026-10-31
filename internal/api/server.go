@@ -16,17 +16,17 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/grapeid/sp-common/decode"
-	"github.com/grapeid/sp-witness-watcher/internal/signer"
+	"github.com/grapeid/sp-common/sign"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
 
 type Server struct {
 	Store    *store.ServiceStore
-	Identity *signer.Identity
+	Identity *sign.Identity
 	lim      *ipLimiter
 }
 
-func New(st *store.ServiceStore, id *signer.Identity) *Server {
+func New(st *store.ServiceStore, id *sign.Identity) *Server {
 	return &Server{Store: st, Identity: id, lim: newIPLimiter(120, time.Minute)}
 }
 

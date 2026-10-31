@@ -155,7 +155,9 @@ docker run -p 8092:8092 -v ww-data:/data sp-witness-watcher
 an Ed25519 key and writes it to `service_identity.json` in `WW_DATA_DIR`. Every
 receipt it issues is signed by that key. Keep the data directory on durable
 storage and back it up: a witness that comes back with a new identity has
-invalidated every receipt it ever issued.
+invalidated every receipt it ever issued. A `service_identity.json` that exists
+but holds no readable key stops the service at start-up; it is never replaced
+with a new one.
 
 **One identity per instance.** Running several instances to give controllers
 several witnesses only works if each has its own data directory, and so its own

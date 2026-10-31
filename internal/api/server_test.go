@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/grapeid/sp-witness-watcher/internal/signer"
+	"github.com/grapeid/sp-common/sign"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
 
@@ -23,7 +23,7 @@ func TestWitnessWatcherFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	id, err := signer.LoadOrCreate(filepath.Join(dir, "id"))
+	id, err := sign.LoadOrCreateIdentity(filepath.Join(dir, "id", "service_identity.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestHealthAnswersOnBothPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	id, err := signer.LoadOrCreate(filepath.Join(dir, "id"))
+	id, err := sign.LoadOrCreateIdentity(filepath.Join(dir, "id", "service_identity.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

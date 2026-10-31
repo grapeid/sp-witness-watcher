@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/grapeid/sp-witness-watcher/internal/signer"
+	"github.com/grapeid/sp-common/sign"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
 
-func hexWorld(t *testing.T) (http.Handler, *signer.Identity) {
+func hexWorld(t *testing.T) (http.Handler, *sign.Identity) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "db"))
@@ -26,7 +26,7 @@ func hexWorld(t *testing.T) (http.Handler, *signer.Identity) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	id, err := signer.LoadOrCreate(filepath.Join(dir, "id"))
+	id, err := sign.LoadOrCreateIdentity(filepath.Join(dir, "id", "service_identity.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestFillingAGapMustAgreeWithWhatFollows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	id, _ := signer.LoadOrCreate(filepath.Join(dir, "id"))
+	id, _ := sign.LoadOrCreateIdentity(filepath.Join(dir, "id", "service_identity.json"))
 	router := New(st, id).Router()
 	c := newController(t)
 	postEvent(t, router, c.aid, c.log[0], c.priv)
@@ -276,7 +276,7 @@ func TestAStrangersEventsTakeNoEscrowAndRecordNoConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	id, _ := signer.LoadOrCreate(filepath.Join(dir, "id"))
+	id, _ := sign.LoadOrCreateIdentity(filepath.Join(dir, "id", "service_identity.json"))
 	router := New(st, id).Router()
 	c := newController(t)
 	_, stranger, _ := ed25519.GenerateKey(nil)

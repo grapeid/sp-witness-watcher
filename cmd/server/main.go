@@ -4,9 +4,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
+	"github.com/grapeid/sp-common/sign"
 	"github.com/grapeid/sp-witness-watcher/internal/api"
-	"github.com/grapeid/sp-witness-watcher/internal/signer"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
 
@@ -44,7 +45,7 @@ func main() {
 		log.Printf("[sp-witness-watcher] sequences %s: %d identities", mode, len(found))
 	}
 
-	id, err := signer.LoadOrCreate(dataDir)
+	id, err := sign.LoadOrCreateIdentity(filepath.Join(dataDir, "service_identity.json"))
 	if err != nil {
 		log.Fatal(err)
 	}
