@@ -2,9 +2,10 @@ package api
 
 import (
 	"crypto/ed25519"
-	"encoding/base64"
 	"fmt"
 	"strconv"
+
+	"github.com/grapeid/sp-common/decode"
 )
 
 // Checking that a controller authorised the event it is asking to have
@@ -119,6 +120,10 @@ func verifyControllerSignature(raw []byte, event map[string]interface{}, cesrSig
 // An establishment event carries its own keys, and its first is the one read.
 // Anything else is signed by whatever is in force, which signingKeyFor
 // resolves from the held log before calling this.
+//
+// Read by sp-common's decoder, which checks the derivation code and the lead
+// bits. Reading the key by its length alone took a Blake3 digest (code E) for
+// an Ed25519 key, and four strings for every key.
 func signingKeyOf(event map[string]interface{}) (ed25519.PublicKey, error) {
 	keys, ok := event["k"].([]interface{})
 	if !ok || len(keys) == 0 {
@@ -126,33 +131,23 @@ func signingKeyOf(event map[string]interface{}) (ed25519.PublicKey, error) {
 			"signature against")
 	}
 	qb64, ok := keys[0].(string)
-	if !ok || len(qb64) != 44 {
+	if !ok {
 		return nil, fmt.Errorf("the event's key is not a qb64 Ed25519 key")
 	}
-	// qb64 for a 1-character code: the code replaces the first character of the
-	// base64 of a one-byte-padded key, so restoring that byte recovers the key.
-	raw, err := base64.RawURLEncoding.DecodeString("A" + qb64[1:])
+	pub, _, err := decode.Ed25519KeyQB64(qb64)
 	if err != nil {
-		return nil, fmt.Errorf("the event's key does not decode: %w", err)
+		return nil, fmt.Errorf("the event's key is not a qb64 Ed25519 key: %w", err)
 	}
-	if len(raw) != 33 {
-		return nil, fmt.Errorf("the event's key decodes to %d bytes, not 33", len(raw))
-	}
-	return ed25519.PublicKey(raw[1:]), nil
+	return pub, nil
 }
 
-// decodeCesrSignature accepts the CESR "0B" form a controller signs with.
+// decodeCesrSignature accepts the CESR "0B" form a controller signs with,
+// through sp-common's decoder: its lead bits must be zero, so a signature has
+// one string, not sixteen.
 func decodeCesrSignature(sig string) ([]byte, error) {
-	if len(sig) != 88 || sig[:2] != "0B" {
-		return nil, fmt.Errorf("the controller signature is not a CESR Ed25519 signature")
-	}
-	// A 2-character code stands in for two leading pad bytes.
-	raw, err := base64.RawURLEncoding.DecodeString("AA" + sig[2:])
+	raw, err := decode.Ed25519SignatureQB64(sig)
 	if err != nil {
-		return nil, fmt.Errorf("the controller signature does not decode: %w", err)
+		return nil, fmt.Errorf("the controller signature is not a CESR Ed25519 signature: %w", err)
 	}
-	if len(raw) != 66 {
-		return nil, fmt.Errorf("the controller signature decodes to %d bytes, not 66", len(raw))
-	}
-	return raw[2:], nil
+	return raw, nil
 }

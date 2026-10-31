@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/grapeid/sp-common/decode"
 	"github.com/grapeid/sp-witness-watcher/internal/signer"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
@@ -133,7 +134,7 @@ func (req witnessEventRequest) event() (raw []byte, parsed map[string]interface{
 		}
 		return nil, nil, fmt.Errorf("no event was supplied")
 	}
-	raw, err = base64.StdEncoding.DecodeString(req.EventB64)
+	raw, err = decode.Base64(req.EventB64)
 	if err != nil {
 		return nil, nil, fmt.Errorf("event_b64 is not readable base64: %w", err)
 	}
