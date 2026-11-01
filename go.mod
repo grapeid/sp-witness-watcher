@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/go-chi/chi/v5 v5.2.5
-	github.com/grapeid/keri-go v0.2.0
+	github.com/grapeid/keri-go v0.3.0
 	github.com/grapeid/sp-common v0.0.0-20261031192253-65359a6496f4
 	github.com/zeebo/blake3 v0.2.4
 	modernc.org/sqlite v1.46.1
