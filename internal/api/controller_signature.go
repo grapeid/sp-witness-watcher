@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	keri "github.com/grapeid/keri-go"
 	"github.com/grapeid/sp-common/decode"
 )
 
@@ -104,11 +105,12 @@ func verifyControllerSignature(raw []byte, event map[string]interface{}, cesrSig
 	if err != nil {
 		return err
 	}
-	sig, err := decodeCesrSignature(cesrSig)
+	sig, err := readControllerSignature(cesrSig)
 	if err != nil {
 		return err
 	}
-	if !ed25519.Verify(key, raw, sig) {
+	// The key used is the first one, so only a signature naming it is hers.
+	if sig.At.Index != 0 || !ed25519.Verify(key, raw, sig.Raw) {
 		return fmt.Errorf("the event is not signed by the key it declares, so the identity " +
 			"it claims to come from did not authorise it")
 	}
@@ -141,13 +143,32 @@ func signingKeyOf(event map[string]interface{}) (ed25519.PublicKey, error) {
 	return pub, nil
 }
 
-// decodeCesrSignature accepts the CESR "0B" form a controller signs with,
-// through sp-common's decoder: its lead bits must be zero, so a signature has
-// one string, not sixteen.
-func decodeCesrSignature(sig string) ([]byte, error) {
-	raw, err := decode.Ed25519SignatureQB64(sig)
-	if err != nil {
-		return nil, fmt.Errorf("the controller signature is not a CESR Ed25519 signature: %w", err)
+// controllerSignature is a controller signature as KERI attaches it: the
+// indexed form, and where it counts.
+type controllerSignature struct {
+	keri.IndexedSignature
+	QB64 string
+}
+
+// readControllerSignature reads a controller signature in either form a
+// controller sends. The unindexed "0B" form, through sp-common's decoder (its
+// lead bits must be zero, so a signature has one string, not sixteen), is a
+// signature by the first key, opening the first commitment. An indexed form
+// (A, B, 2A or 2B, as keripy 1.3.6 writes them) is read by keri-go and carries
+// its own places.
+func readControllerSignature(sig string) (controllerSignature, error) {
+	if raw, err := decode.Ed25519SignatureQB64(sig); err == nil {
+		qb64, err := keri.EncodeIndexedSignature(raw, keri.SamePlace(0))
+		if err != nil {
+			return controllerSignature{}, err
+		}
+		return controllerSignature{IndexedSignature: keri.IndexedSignature{
+			Code: "A", At: keri.SamePlace(0), Raw: raw}, QB64: qb64}, nil
 	}
-	return raw, nil
+	parsed, err := keri.ParseIndexedSignature(sig)
+	if err != nil {
+		return controllerSignature{}, fmt.Errorf("the controller signature is not a CESR "+
+			"Ed25519 signature, indexed or not: %w", err)
+	}
+	return controllerSignature{IndexedSignature: parsed, QB64: sig}, nil
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -321,9 +322,101 @@ func TestASecondRotationAtAHeldPlaceIsAConflict(t *testing.T) {
 	aid, said := incept(t, router, "1", b, c)
 	first, _ := rotate(t, aid, said, 1, []keyPair{b}, newKeyPair(t))
 	wantStatus(t, postEvent(t, router, aid, first, b.priv), 200, "the first rotation")
+	// c is the second commitment, so its signature names that place (2A).
 	other, _ := rotate(t, aid, said, 1, []keyPair{c}, newKeyPair(t))
-	wantStatus(t, postEvent(t, router, aid, other, c.priv), 409, "another rotation at the same place")
+	wantStatus(t, postSigned(t, router, aid, other, signedAt(t, c, other, keri.SignaturePlace{Index: 0, Ondex: 1})),
+		409, "another rotation at the same place")
 	if sn := tipOf(t, router, aid); sn != 1 {
 		t.Fatalf("the held log moved to %d", sn)
 	}
+}
+
+// postSigned files an event with the controller signature given as written.
+func postSigned(t *testing.T, router http.Handler, aid string, raw []byte, sig string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"aid": aid, "event_b64": base64.StdEncoding.EncodeToString(raw), "cesr_signature": sig,
+	})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/witness/event", bytes.NewReader(body)))
+	return rec
+}
+
+// signedAt is k's signature over raw, indexed at the places given.
+func signedAt(t *testing.T, k keyPair, raw []byte, at keri.SignaturePlace) string {
+	t.Helper()
+	qb64, err := keri.EncodeIndexedSignature(ed25519.Sign(k.priv, raw), at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return qb64
+}
+
+// twoOwners founds an identity committing to two owners' two next keys each,
+// under the next-key threshold nt, and returns the second owner's second key,
+// the last commitment.
+func twoOwners(t *testing.T, router http.Handler, nt string) (aid, said string, last keyPair) {
+	t.Helper()
+	k := []keyPair{newKeyPair(t), newKeyPair(t), newKeyPair(t), newKeyPair(t)}
+	cur := newKeyPair(t)
+	raw, err := keri.BuildInception(keri.InceptionInput{
+		Keys: pubs(cur), NextDigests: digs(k...), Nsith: json.RawMessage(nt),
+		Derivation: "self-addressing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, _ := keri.ParseEvent(raw)
+	wantStatus(t, postEvent(t, router, ev.Identifier, raw, cur.priv), 200, "the two-owner inception")
+	return ev.Identifier, ev.SAID, k[3]
+}
+
+// Under a nested threshold either owner can rotate alone, and the second
+// owner's second key opens the fourth commitment from the first place in the
+// rotation's keys, which takes the two-place code 2A. Before, a weighted next
+// threshold was refused whatever signed, and 2A was not read.
+func TestATwoOwnerRotationSignedWithTwoPlacesIsWitnessed(t *testing.T) {
+	router, _ := hexWorld(t)
+	aid, said, last := twoOwners(t, router, `[{"1":["1","1"]},{"1":["1","1"]}]`)
+	rot, _ := rotate(t, aid, said, 1, []keyPair{last}, newKeyPair(t))
+
+	sig := signedAt(t, last, rot, keri.SignaturePlace{Index: 0, Ondex: 3})
+	if sig[:2] != "2A" {
+		t.Fatalf("expected a 2A signature, got %s", sig[:2])
+	}
+	// Named at the first commitment instead, the same signature opens nothing.
+	wantStatus(t, postSigned(t, router, aid, rot, signedAt(t, last, rot, keri.SamePlace(0))), 400,
+		"the rotation signed naming a commitment its key does not open")
+	wantStatus(t, postEvent(t, router, aid, rot, last.priv), 400,
+		"the rotation signed unindexed, which names the first commitment")
+	wantStatus(t, postSigned(t, router, aid, rot, signedAt(t, last, rot, keri.SignaturePlace{CurrentOnly: true})), 400,
+		"the rotation signed current-only, which opens nothing")
+	wantStatus(t, postSigned(t, router, aid, rot, sig), 200, "the rotation signed with 2A")
+}
+
+// Where each owner's set is worth half and both owners must agree, one exposed
+// key is too few.
+func TestAPartialRotationSignedByTooFewExposedKeysIsRefused(t *testing.T) {
+	router, _ := hexWorld(t)
+	aid, said, last := twoOwners(t, router, `[{"1/2":["1","1"]},{"1/2":["1","1"]}]`)
+	rot, _ := rotate(t, aid, said, 1, []keyPair{last}, newKeyPair(t))
+	wantStatus(t, postSigned(t, router, aid, rot, signedAt(t, last, rot, keri.SignaturePlace{Index: 0, Ondex: 3})),
+		400, "a rotation by one key of a threshold needing two owners")
+	if sn := tipOf(t, router, aid); sn != 0 {
+		t.Fatalf("a refused rotation moved the held log to %d", sn)
+	}
+}
+
+// Unindexed, a signature names the first commitment, as an A signature at the
+// first key does. A rotation to the second commitment signed that way opens
+// nothing, as keripy judges it; before, a key appearing anywhere in the
+// commitment was taken.
+func TestAnUnindexedRotationToTheSecondCommitmentIsRefused(t *testing.T) {
+	router, _ := hexWorld(t)
+	b, c := newKeyPair(t), newKeyPair(t)
+	aid, said := incept(t, router, "1", b, c)
+	rot, _ := rotate(t, aid, said, 1, []keyPair{c}, newKeyPair(t))
+	wantStatus(t, postEvent(t, router, aid, rot, c.priv), 400, "an unindexed rotation to the second commitment")
+	wantStatus(t, postSigned(t, router, aid, rot, signedAt(t, c, rot, keri.SignaturePlace{Index: 0, Ondex: 1})),
+		200, "the same rotation naming its commitment")
 }
