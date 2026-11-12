@@ -1,5 +1,9 @@
+filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
+filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
 github.com/LF-Decentralized-Trust-labs/identity-bot/identity-agent-core/relayproto v0.0.0-20261022154728-134689791b1a h1:lQhzZGi6Oh335wgje4UwXUuLLunNIJz5HGdeatCn/ms=
 github.com/LF-Decentralized-Trust-labs/identity-bot/identity-agent-core/relayproto v0.0.0-20261022154728-134689791b1a/go.mod h1:SyJvK6o5aYufFS56KL5hJBBXjJZSGnjMppgifgazsIw=
+github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
+github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/go-chi/chi/v5 v5.2.5 h1:Eg4myHZBjyvJmAFjFvWgrqDTXFyOzjj7YIm3L3mu6Ug=
@@ -12,6 +16,8 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/grapeid/keri-go v0.3.0 h1:DSA/qpVUlRtrvxvQB5EesYx/UgEXeu5dHuCZD3Oi1RI=
 github.com/grapeid/keri-go v0.3.0/go.mod h1:Gypsr09J5eYiw9vpimQrE8nn9UolBOv0HkkrdNynLYg=
+github.com/grapeid/keri-go v0.5.1-0.20261108070129-11308439ee52 h1:OA98uNdb59eGKdZw8jYZjmH5W5gp1hRFPcu4za3dflg=
+github.com/grapeid/keri-go v0.5.1-0.20261108070129-11308439ee52/go.mod h1:HhTAxqI4AtUJJlPudsYlm2C0SHG3vi8fFhnNc0izIog=
 github.com/grapeid/sp-common v0.0.0-20261031192253-65359a6496f4 h1:803Iw0fn2QqWEzSMuUixPyY64FUTCUzcQorlRg/x/aY=
 github.com/grapeid/sp-common v0.0.0-20261031192253-65359a6496f4/go.mod h1:uWr9oNdbmNyWfB7DKPTKW1qPEN5bAolhHn522BOlFNk=
 github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs4luLUK2k=

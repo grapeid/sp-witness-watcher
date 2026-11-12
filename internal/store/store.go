@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -178,39 +179,46 @@ func (s *ServiceStore) EventAt(aid string, sn int) (rawB64, sig string, ok bool,
 	return rawB64, sig, rawB64 != "" && sig != "", nil
 }
 
+// PublishedEvent is one held event as its controller published and signed it:
+// the bytes, and every controller signature over them.
+type PublishedEvent struct {
+	Raw  []byte
+	Sigs []string
+}
+
 // PublishedLogBefore is aid's log from its inception up to, but not including,
-// sn, as its controller published each event, in order.
+// sn, as its controller published and signed each event, in order.
 //
 // It is all or nothing. A place below sn that is not held, or an event held
-// before witnesses kept the bytes, makes it an error rather than a shorter
-// log: what the caller checks against it (a rotation's commitment) is only
-// sound against the whole history, and a log with a hole in it would answer a
-// narrower question than the one asked.
-func (s *ServiceStore) PublishedLogBefore(aid string, sn int) ([][]byte, error) {
-	rows, err := s.db.Query(`SELECT sequence_num, raw_b64 FROM kel_events WHERE aid=? AND sequence_num>=0 AND sequence_num<? ORDER BY sequence_num`, aid, sn)
+// before witnesses kept the bytes and signatures, makes it an error rather than
+// a shorter log: what the caller checks against it (the key state in force) is
+// only sound against the whole history, and a log with a hole in it would
+// answer a narrower question than the one asked.
+func (s *ServiceStore) PublishedLogBefore(aid string, sn int) ([]PublishedEvent, error) {
+	rows, err := s.db.Query(`SELECT sequence_num, raw_b64, cesr_signature FROM kel_events WHERE aid=? AND sequence_num>=0 AND sequence_num<? ORDER BY sequence_num`, aid, sn)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([][]byte, 0, sn)
+	out := make([]PublishedEvent, 0, sn)
 	for rows.Next() {
 		var at int
-		var rawB64 string
-		if err := rows.Scan(&at, &rawB64); err != nil {
+		var rawB64, sig string
+		if err := rows.Scan(&at, &rawB64, &sig); err != nil {
 			return nil, err
 		}
 		if at != len(out) {
 			return nil, fmt.Errorf("this witness does not hold place %d of the log", len(out))
 		}
-		if rawB64 == "" {
-			return nil, fmt.Errorf("this witness holds place %d of the log without the bytes it "+
-				"was published as", at)
+		if rawB64 == "" || sig == "" {
+			return nil, fmt.Errorf("this witness holds place %d of the log without the bytes and "+
+				"signature it was published with", at)
 		}
 		raw, err := base64.StdEncoding.DecodeString(rawB64)
 		if err != nil {
 			return nil, fmt.Errorf("place %d of the log is held unreadably: %w", at, err)
 		}
-		out = append(out, raw)
+		out = append(out, PublishedEvent{Raw: raw, Sigs: DecodeSignatures(sig)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -219,6 +227,35 @@ func (s *ServiceStore) PublishedLogBefore(aid string, sn int) ([][]byte, error) 
 		return nil, fmt.Errorf("this witness does not hold place %d of the log", len(out))
 	}
 	return out, nil
+}
+
+// EncodeSignatures is the controller signatures over one event as the one text
+// column they are kept in: the signature itself when there is one, which is
+// what every event held before several were kept looks like, and a JSON list
+// when there are more.
+func EncodeSignatures(sigs []string) string {
+	switch len(sigs) {
+	case 0:
+		return ""
+	case 1:
+		return sigs[0]
+	}
+	b, _ := json.Marshal(sigs)
+	return string(b)
+}
+
+// DecodeSignatures is EncodeSignatures read back.
+func DecodeSignatures(stored string) []string {
+	if strings.HasPrefix(stored, "[") {
+		var sigs []string
+		if json.Unmarshal([]byte(stored), &sigs) == nil {
+			return sigs
+		}
+	}
+	if stored == "" {
+		return nil
+	}
+	return []string{stored}
 }
 
 func (s *ServiceStore) Enroll(aid, controllerAID string) error {

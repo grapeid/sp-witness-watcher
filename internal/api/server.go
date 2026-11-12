@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LF-Decentralized-Trust-labs/identity-bot/identity-agent-core/witnessproto"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	keri "github.com/grapeid/keri-go"
 	"github.com/grapeid/sp-common/decode"
 	"github.com/grapeid/sp-common/sign"
 	"github.com/grapeid/sp-witness-watcher/internal/digest"
@@ -112,6 +114,24 @@ type witnessEventRequest struct {
 	// only report that somebody sent it a JSON object.
 	EventB64      string `json:"event_b64"`
 	CesrSignature string `json:"cesr_signature"`
+	// CesrSignatures is every controller signature over the event, for an
+	// identity with several keys, which signs with a threshold of them. When
+	// present it is the whole list and CesrSignature is its first.
+	CesrSignatures []string `json:"cesr_signatures"`
+}
+
+// signatures is every controller signature the request offers.
+func (req witnessEventRequest) signatures() []string {
+	var out []string
+	for _, s := range req.CesrSignatures {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 && req.CesrSignature != "" {
+		out = []string{req.CesrSignature}
+	}
+	return out
 }
 
 // event returns the event to receipt, as bytes and parsed.
@@ -187,7 +207,8 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 	// real history from an invented one — and because a stored event moves the
 	// digest this service reports, an unchecked write is also a way to accuse
 	// an innocent identity of equivocating.
-	if req.CesrSignature == "" {
+	offered := req.signatures()
+	if len(offered) == 0 {
 		writeErr(w, http.StatusBadRequest,
 			"an event must carry the controller signature over its published bytes")
 		return
@@ -206,10 +227,13 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 	// whose signing key cannot be shown from what is held, such as one past a
 	// gap that held a rotation, is refused, and its controller sends again in
 	// order.
-	if err := verifyControllerSignature(rawEvent, event, req.CesrSignature, events, s.publishedLog(req.AID)); err != nil {
+	verified, err := verifyControllerSignatures(rawEvent, offered, s.publishedLog(req.AID), s.tipOf(req.AID))
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// What is kept and served is the signatures that verified, as attached.
+	sigField := store.EncodeSignatures(verified)
 	switch err := eventBelongsHere(rawEvent, events); {
 	case (errors.Is(err, errNoPredecessor) || errors.Is(err, errNextDisagrees)) && len(events) == 0:
 		// Nothing held back for an identity this witness holds nothing of:
@@ -229,7 +253,7 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if eerr := s.Store.EscrowEvent(req.AID, seqOrMinus(event), eventSAIDOf(event),
-			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature, senderOf(clientIP(r)), established); eerr != nil {
+			base64.StdEncoding.EncodeToString(rawEvent), sigField, senderOf(clientIP(r)), established); eerr != nil {
 			writeErr(w, http.StatusTooManyRequests, eerr.Error())
 			return
 		}
@@ -254,13 +278,21 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 	// An event already held at its place is answered with its receipt, as
 	// though it had just arrived, so a controller sending from where it thinks
 	// this witness stopped carries on. Something else there is a conflict.
-	d, _, err := s.Store.AcceptEvent(req.AID, seq, event, base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature)
+	d, _, err := s.Store.AcceptEvent(req.AID, seq, event, base64.StdEncoding.EncodeToString(rawEvent), sigField)
 	if errors.Is(err, store.ErrConflict) {
 		// Correctly signed (checked above) and different from what is held: a second
-		// history. It is kept as published, beside the first, so this service can
-		// hand over both. The first stays; nothing held is rewritten.
+		// history, unless what is held at that place is a recovery rotation that
+		// replaces this event, which is what a recovery does to the interactions a
+		// retired key signed: that is no second history and is not kept or served
+		// as one (keripy does not call it duplicity either).
+		if msg, merr := signedMessage(rawEvent, verified); merr == nil && s.retiredByHeldRecovery(req.AID, seq, msg) {
+			writeErr(w, http.StatusConflict, "this place holds a recovery rotation that replaces this event")
+			return
+		}
+		// Kept as published, beside the first, so this service can hand over both.
+		// The first stays; nothing held is rewritten.
 		if kerr := s.Store.KeepConflicting(req.AID, seq, eventSAIDOf(event),
-			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature); kerr != nil {
+			base64.StdEncoding.EncodeToString(rawEvent), sigField); kerr != nil {
 			writeErr(w, http.StatusInternalServerError, kerr.Error())
 			return
 		}
@@ -366,7 +398,8 @@ func (s *Server) handleWitnessKel(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, ev := range events {
 		if p, ok := published[digest.EventSeq(ev)]; ok && p.RawB64 != "" && p.CesrSignature != "" {
-			ev["raw_bytes_b64"], ev["cesr_signature"] = p.RawB64, p.CesrSignature
+			ev["raw_bytes_b64"] = p.RawB64
+			ev["cesr_signature"], ev["cesr_signatures"] = servedSignatures(p.CesrSignature)
 		}
 	}
 	// The other histories seen, which is what lets a verifier holding the first one
@@ -378,12 +411,24 @@ func (s *Server) handleWitnessKel(w http.ResponseWriter, r *http.Request) {
 	}
 	conflicting := make([]map[string]interface{}, 0, len(rivals))
 	for _, c := range rivals {
+		first, all := servedSignatures(c.CesrSignature)
 		conflicting = append(conflicting, map[string]interface{}{
 			"sequence_number": c.SequenceNum, "said": c.SAID,
-			"raw_bytes_b64": c.RawB64, "cesr_signature": c.CesrSignature,
+			"raw_bytes_b64": c.RawB64, "cesr_signature": first, "cesr_signatures": all,
 		})
 	}
 	jsonOK(w, map[string]interface{}{"aid": aid, "kel": events, "conflicting": conflicting, "count": len(events)})
+}
+
+// servedSignatures is a kept signature field as served: the first signature,
+// for a reader that takes one, and every signature, for one that checks a
+// threshold.
+func servedSignatures(stored string) (first string, all []string) {
+	all = store.DecodeSignatures(stored)
+	if len(all) > 0 {
+		first = all[0]
+	}
+	return first, all
 }
 
 func (s *Server) handleKelDigest(w http.ResponseWriter, r *http.Request) {
@@ -399,20 +444,47 @@ func (s *Server) handleKelDigest(w http.ResponseWriter, r *http.Request) {
 		"digest": nil, "observed_since": nil, "first_seen_at": nil,
 		"signed_by": s.Identity.AID,
 	}
+	var digestP, firstSeenP, sinceP *string
+	rival := false
 	if aid != "" && seqStr != "" {
 		if d, ok, err := s.Store.GetObservationDigest(aid, seq); err == nil && ok {
 			since, _ := s.Store.ObservedSince(aid)
 			// first_seen_at is when this service saw the log through this place,
-			// from its own observation. observed_since is how long this service has
-			// been looking at the identity.
+			// from its own observation: it dates the first digest it held at that
+			// place, and a digest served later can be recomputed from what is held
+			// (digest-recomputed), so the date is the first sighting's and not a
+			// promise about this digest's history. observed_since is how long this
+			// service has been looking at the identity.
 			seenAt, _ := s.Store.ObservedAt(aid, seq)
+			digestP = &d
 			resp["digest"] = d
 			resp["observed_since"] = since
 			resp["first_seen_at"] = seenAt
+			if since != "" {
+				sinceP = &since
+			}
+			if seenAt != "" {
+				firstSeenP = &seenAt
+			}
+		}
+		// Whether a validly signed event that conflicts with a held one is kept at
+		// or below this place, which a digest of the held branch cannot show. The
+		// asker then fetches the log and judges both branches itself.
+		if rivals, err := s.Store.ConflictingEvents(aid); err == nil {
+			for _, c := range rivals {
+				rival = rival || c.SequenceNum <= seq
+			}
 		}
 	}
-	unsigned, _ := json.Marshal(resp)
-	resp["signature"] = s.Identity.Sign(unsigned)
+	if rival {
+		resp["rival_at_or_below"] = true
+	}
+	// Signed over the one statement the protocol defines, the text the client
+	// rebuilds from the fields of the answer (witnessproto.DigestStatementWithRival),
+	// and not over this service's own rendering of them.
+	if stmt, err := witnessproto.DigestStatementWithRival(aid, seq, digestP, firstSeenP, sinceP, rival); err == nil {
+		resp["signature"] = s.Identity.CESRSignature([]byte(stmt))
+	}
 	signed, _ := json.Marshal(resp)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(signed)
@@ -549,7 +621,48 @@ func eventSAIDOf(event map[string]interface{}) string {
 // publishedLog reads an identity's log as this witness holds it published,
 // which is what a rotation is checked against.
 func (s *Server) publishedLog(aid string) publishedLog {
-	return func(sn int) ([][]byte, error) { return s.Store.PublishedLogBefore(aid, sn) }
+	return func(sn int) ([]store.PublishedEvent, error) { return s.Store.PublishedLogBefore(aid, sn) }
+}
+
+// tipOf is the place of the newest event this witness holds with nothing
+// missing below it, or -1.
+func (s *Server) tipOf(aid string) func() (int, error) {
+	return func() (int, error) {
+		sn, _, err := s.Store.UnbrokenTip(aid)
+		return sn, err
+	}
+}
+
+// retiredByHeldRecovery says whether the event held at sn is a recovery
+// rotation that replaces rival, an event at the same place: the log below sn
+// and the rival, with the held event admitted to it, leave the rival
+// superseded. Both are verified by keri-go, nothing on trust.
+func (s *Server) retiredByHeldRecovery(aid string, sn int, rival []byte) bool {
+	if sn == 0 {
+		return false
+	}
+	prefix, err := s.Store.PublishedLogBefore(aid, sn)
+	if err != nil {
+		return false
+	}
+	rawB64, sig, ok, err := s.Store.EventAt(aid, sn)
+	if err != nil || !ok {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(rawB64)
+	if err != nil {
+		return false
+	}
+	held, err := signedMessage(raw, store.DecodeSignatures(sig))
+	if err != nil {
+		return false
+	}
+	branch, err := keri.ValidateSignedKEL(append(messagesOf(prefix), rival))
+	if err != nil {
+		return false
+	}
+	adm, err := branch.Admit(held)
+	return err == nil && adm.Supersedes > 0
 }
 
 // promoteEscrowed takes up, in order from after seq, the events held back
@@ -581,11 +694,12 @@ func (s *Server) promoteEscrowed(aid string, seq int) {
 				}
 				continue
 			}
-			if err := verifyControllerSignature(raw, event, e.Signature, held, s.publishedLog(aid)); err != nil {
+			verified, err := verifyControllerSignatures(raw, store.DecodeSignatures(e.Signature), s.publishedLog(aid), s.tipOf(aid))
+			if err != nil {
 				s.Store.DropEscrowed(aid, e.SAID)
 				continue
 			}
-			if _, _, err := s.Store.AcceptEvent(aid, next, event, e.RawB64, e.Signature); err != nil {
+			if _, _, err := s.Store.AcceptEvent(aid, next, event, e.RawB64, store.EncodeSignatures(verified)); err != nil {
 				continue
 			}
 			s.Store.DropEscrowed(aid, e.SAID)
@@ -621,5 +735,6 @@ func (s *Server) handleWitnessKelEvent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "no event is held there as it was published")
 		return
 	}
-	jsonOK(w, map[string]string{"raw_bytes_b64": raw, "cesr_signature": sig})
+	first, all := servedSignatures(sig)
+	jsonOK(w, map[string]interface{}{"raw_bytes_b64": raw, "cesr_signature": first, "cesr_signatures": all})
 }
