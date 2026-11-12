@@ -408,11 +408,16 @@ func TestAWitnessHandsBackAnEvent(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/witness/kel/"+c.aid+"/event/1", nil))
 	var out struct {
-		Raw string `json:"raw_bytes_b64"`
-		Sig string `json:"cesr_signature"`
+		Raw  string   `json:"raw_bytes_b64"`
+		Sig  string   `json:"cesr_signature"`
+		Sigs []string `json:"cesr_signatures"`
 	}
 	json.Unmarshal(rec.Body.Bytes(), &out)
-	if rec.Code != http.StatusOK || out.Raw != base64.StdEncoding.EncodeToString(one) || out.Sig != cesrSig(ed25519.Sign(c.priv, one)) {
+	// Kept as the indexed signature the verification judged, which is what an
+	// unindexed one by the first key is read as; served as the first and as the list.
+	want, _ := keri.EncodeIndexedSignature(ed25519.Sign(c.priv, one), keri.SamePlace(0))
+	if rec.Code != http.StatusOK || out.Raw != base64.StdEncoding.EncodeToString(one) || out.Sig != want ||
+		len(out.Sigs) != 1 || out.Sigs[0] != want {
 		t.Fatalf("handed back %d %s", rec.Code, rec.Body.String())
 	}
 	rec = httptest.NewRecorder()

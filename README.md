@@ -102,19 +102,41 @@ Agent that cannot get a witness's tip sends it nothing that pass, rather than
 its whole log.
 
 `POST /witness/event` requires the event's published bytes (`event_b64`) and the
-controller's signature over them (`cesr_signature`). Nothing is stored or
-receipted unverified. A rotation (`rot`, or `drt` for a delegated identity) is
-witnessed only when the whole log before it is held as published, its keys
-digest to those the previous establishment event committed to, and its one
-signature, by its first key, meets both its own signing threshold and the
-previous event's next-key threshold. Refused for now, each failing closed: a
-rotation needing more than one signature or signed by another key (an event
-carries one signature here), a weighted next-key threshold, keys the previous
-event did not commit to, a log held from before witnesses kept published
-bytes, and a recovery rotation replacing interactions already held. A
-delegated rotation is not checked against its delegator's approval, as a
-delegated inception is not. Write and read paths are rate limited per client
-IP.
+controller's signatures over them: `cesr_signatures`, every one, for an identity
+with several keys (`cesr_signature` alone is the first, and is read when the list
+is absent). Nothing is stored or receipted unverified. Each event is judged by
+keri-go's `VerifyEvent` against the key state in force as this witness holds the
+log: an inception against its own keys, a rotation against the commitment the
+previous establishment event made (the keys it presents open enough of it, by that
+event's next-key threshold, nested and weighted thresholds included), and an
+interaction against the newest establishment event's keys, each under the
+signing threshold in force. A signature that does not verify is dropped and the
+rest are judged; the ones that did are what is kept and served. An interaction
+that arrives past a place this witness does not hold is held back after its
+signatures are checked against the keys at the end of the log it holds; a
+rotation there, a log held from before witnesses kept the bytes and signatures,
+and a rotation to keys the previous event did not commit to are refused, failing
+closed. A delegated rotation is not checked against its delegator's approval, as
+a delegated inception is not. Write and read paths are rate limited per client IP.
+
+`GET /witness/kel/{aid}` serves each held event with its bytes and every signature
+(`cesr_signature`, the first, and `cesr_signatures`), and `conflicting`: a validly
+signed event at a place that already holds another, kept as published beside the
+first, which is never rewritten. An event a held recovery rotation replaces (an
+interaction the retired key signed at the rotation's place) is not a second
+history and is not kept or served as one.
+
+`GET /public/kel-digest` is signed over the shared statement
+(`witnessproto.DigestStatementWithRival`), with `rival_at_or_below` set when a
+conflicting event is held at or below the place asked about, so a client whose
+digest matches is still told to fetch the log. `first_seen_at` dates the first
+digest held at that place; a digest served later can be recomputed from what is
+held, so it is a date for the first sighting and not a history of the digest.
+
+The shared fixture both this service and an Identity Agent's `FetchLog` test
+against is `witnessproto.KelLogContractFixture` (a multi-key identity with a
+conflicting event); `internal/api/a_watcher_serves_what_the_agent_fetches_test.go`
+is this side of it.
 
 ## Build and run
 

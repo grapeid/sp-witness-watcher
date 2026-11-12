@@ -198,7 +198,7 @@ func TestARotationUnderThePriorNextThresholdIsRefused(t *testing.T) {
 
 	rec := postEvent(t, router, aid, rotation(t, aid, said, "1", b, c), b.priv)
 	wantStatus(t, rec, 400, "a rotation signed by one of two required next keys")
-	if !strings.Contains(rec.Body.String(), "threshold 2") {
+	if !strings.Contains(rec.Body.String(), "next threshold") {
 		t.Fatalf("the refusal does not say why: %s", rec.Body.String())
 	}
 }

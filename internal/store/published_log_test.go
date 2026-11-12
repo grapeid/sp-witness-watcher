@@ -28,7 +28,7 @@ func TestThePublishedLogIsWholeOrRefused(t *testing.T) {
 	put("Ewhole", 1, b64("one"))
 	put("Ewhole", 2, b64("two"))
 	log, err := st.PublishedLogBefore("Ewhole", 2)
-	if err != nil || len(log) != 2 || string(log[0]) != "zero" || string(log[1]) != "one" {
+	if err != nil || len(log) != 2 || string(log[0].Raw) != "zero" || string(log[1].Raw) != "one" || log[0].Sigs[0] != "sig" {
 		t.Fatalf("the log below place 2 was %q, %v", log, err)
 	}
 
@@ -43,7 +43,7 @@ func TestThePublishedLogIsWholeOrRefused(t *testing.T) {
 
 	put("Elegacy", 0, b64("zero"))
 	put("Elegacy", 1, "")
-	if _, err := st.PublishedLogBefore("Elegacy", 2); err == nil || !strings.Contains(err.Error(), "without the bytes") {
+	if _, err := st.PublishedLogBefore("Elegacy", 2); err == nil || !strings.Contains(err.Error(), "without the bytes and") {
 		t.Fatalf("a log held without its published bytes was not refused for it: %v", err)
 	}
 }

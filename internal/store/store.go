@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -102,6 +103,19 @@ CREATE TABLE IF NOT EXISTS sequence_repairs (
     row_before TEXT NOT NULL,
     repaired_at TEXT NOT NULL
 );
+-- A correctly signed event at a place this service already held a different
+-- event at: the second history, kept as it was published so it can be handed to
+-- anybody who asks, with the first, as proof of two histories. Nothing held
+-- here is rewritten for it; the first-seen event stays where it is.
+CREATE TABLE IF NOT EXISTS conflicting_events (
+    aid TEXT NOT NULL,
+    sequence_num INTEGER NOT NULL,
+    said TEXT NOT NULL,
+    raw_b64 TEXT NOT NULL,
+    cesr_signature TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    PRIMARY KEY (aid, said)
+);
 CREATE TABLE IF NOT EXISTS digest_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     aid TEXT NOT NULL,
@@ -165,39 +179,46 @@ func (s *ServiceStore) EventAt(aid string, sn int) (rawB64, sig string, ok bool,
 	return rawB64, sig, rawB64 != "" && sig != "", nil
 }
 
+// PublishedEvent is one held event as its controller published and signed it:
+// the bytes, and every controller signature over them.
+type PublishedEvent struct {
+	Raw  []byte
+	Sigs []string
+}
+
 // PublishedLogBefore is aid's log from its inception up to, but not including,
-// sn, as its controller published each event, in order.
+// sn, as its controller published and signed each event, in order.
 //
 // It is all or nothing. A place below sn that is not held, or an event held
-// before witnesses kept the bytes, makes it an error rather than a shorter
-// log: what the caller checks against it (a rotation's commitment) is only
-// sound against the whole history, and a log with a hole in it would answer a
-// narrower question than the one asked.
-func (s *ServiceStore) PublishedLogBefore(aid string, sn int) ([][]byte, error) {
-	rows, err := s.db.Query(`SELECT sequence_num, raw_b64 FROM kel_events WHERE aid=? AND sequence_num>=0 AND sequence_num<? ORDER BY sequence_num`, aid, sn)
+// before witnesses kept the bytes and signatures, makes it an error rather than
+// a shorter log: what the caller checks against it (the key state in force) is
+// only sound against the whole history, and a log with a hole in it would
+// answer a narrower question than the one asked.
+func (s *ServiceStore) PublishedLogBefore(aid string, sn int) ([]PublishedEvent, error) {
+	rows, err := s.db.Query(`SELECT sequence_num, raw_b64, cesr_signature FROM kel_events WHERE aid=? AND sequence_num>=0 AND sequence_num<? ORDER BY sequence_num`, aid, sn)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([][]byte, 0, sn)
+	out := make([]PublishedEvent, 0, sn)
 	for rows.Next() {
 		var at int
-		var rawB64 string
-		if err := rows.Scan(&at, &rawB64); err != nil {
+		var rawB64, sig string
+		if err := rows.Scan(&at, &rawB64, &sig); err != nil {
 			return nil, err
 		}
 		if at != len(out) {
 			return nil, fmt.Errorf("this witness does not hold place %d of the log", len(out))
 		}
-		if rawB64 == "" {
-			return nil, fmt.Errorf("this witness holds place %d of the log without the bytes it "+
-				"was published as", at)
+		if rawB64 == "" || sig == "" {
+			return nil, fmt.Errorf("this witness holds place %d of the log without the bytes and "+
+				"signature it was published with", at)
 		}
 		raw, err := base64.StdEncoding.DecodeString(rawB64)
 		if err != nil {
 			return nil, fmt.Errorf("place %d of the log is held unreadably: %w", at, err)
 		}
-		out = append(out, raw)
+		out = append(out, PublishedEvent{Raw: raw, Sigs: DecodeSignatures(sig)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -206,6 +227,35 @@ func (s *ServiceStore) PublishedLogBefore(aid string, sn int) ([][]byte, error) 
 		return nil, fmt.Errorf("this witness does not hold place %d of the log", len(out))
 	}
 	return out, nil
+}
+
+// EncodeSignatures is the controller signatures over one event as the one text
+// column they are kept in: the signature itself when there is one, which is
+// what every event held before several were kept looks like, and a JSON list
+// when there are more.
+func EncodeSignatures(sigs []string) string {
+	switch len(sigs) {
+	case 0:
+		return ""
+	case 1:
+		return sigs[0]
+	}
+	b, _ := json.Marshal(sigs)
+	return string(b)
+}
+
+// DecodeSignatures is EncodeSignatures read back.
+func DecodeSignatures(stored string) []string {
+	if strings.HasPrefix(stored, "[") {
+		var sigs []string
+		if json.Unmarshal([]byte(stored), &sigs) == nil {
+			return sigs
+		}
+	}
+	if stored == "" {
+		return nil
+	}
+	return []string{stored}
 }
 
 func (s *ServiceStore) Enroll(aid, controllerAID string) error {
@@ -276,4 +326,80 @@ func (s *ServiceStore) GetObservationDigest(aid string, seq int) (digest string,
 		return "", false, err
 	}
 	return digest, true, nil
+}
+
+// maxConflictingPerIdentity bounds what one identity can make this service keep.
+// Only an event its controller signed reaches here, so the bound is for a
+// controller that signs without end.
+const maxConflictingPerIdentity = 32
+
+// ConflictingEvent is an event kept beside the one this service holds at its place.
+type ConflictingEvent struct {
+	SequenceNum   int
+	SAID          string
+	RawB64        string
+	CesrSignature string
+}
+
+// KeepConflicting keeps a correctly signed event that conflicts with the one
+// held at its place, exactly as published. Keeping it again is a no-op.
+func (s *ServiceStore) KeepConflicting(aid string, sn int, said, rawB64, sig string) error {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM conflicting_events WHERE aid=?`, aid).Scan(&n); err != nil {
+		return err
+	}
+	if n >= maxConflictingPerIdentity {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO conflicting_events (aid, sequence_num, said, raw_b64, cesr_signature, received_at) VALUES (?,?,?,?,?,?)`,
+		aid, sn, said, rawB64, sig, Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// ConflictingEvents are the events kept beside the ones held, in the order seen.
+func (s *ServiceStore) ConflictingEvents(aid string) ([]ConflictingEvent, error) {
+	rows, err := s.db.Query(`SELECT sequence_num, said, raw_b64, cesr_signature FROM conflicting_events WHERE aid=? ORDER BY sequence_num, received_at`, aid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ConflictingEvent
+	for rows.Next() {
+		var c ConflictingEvent
+		if err := rows.Scan(&c.SequenceNum, &c.SAID, &c.RawB64, &c.CesrSignature); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// PublishedEvents are the held events as their controller published and signed
+// them, by place. An event held before the bytes were kept has none.
+func (s *ServiceStore) PublishedEvents(aid string) (map[int]ConflictingEvent, error) {
+	rows, err := s.db.Query(`SELECT sequence_num, raw_b64, cesr_signature FROM kel_events WHERE aid=?`, aid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int]ConflictingEvent{}
+	for rows.Next() {
+		var c ConflictingEvent
+		if err := rows.Scan(&c.SequenceNum, &c.RawB64, &c.CesrSignature); err != nil {
+			return nil, err
+		}
+		out[c.SequenceNum] = c
+	}
+	return out, rows.Err()
+}
+
+// ObservedAt is when this service first saw the log through place seq, from its
+// own observation of it; "" when it has none.
+func (s *ServiceStore) ObservedAt(aid string, seq int) (string, error) {
+	var at string
+	err := s.db.QueryRow(`SELECT observed_at FROM observations WHERE aid=? AND sequence_num=?`, aid, seq).Scan(&at)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return at, err
 }
