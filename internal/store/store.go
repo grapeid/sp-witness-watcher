@@ -102,6 +102,19 @@ CREATE TABLE IF NOT EXISTS sequence_repairs (
     row_before TEXT NOT NULL,
     repaired_at TEXT NOT NULL
 );
+-- A correctly signed event at a place this service already held a different
+-- event at: the second history, kept as it was published so it can be handed to
+-- anybody who asks, with the first, as proof of two histories. Nothing held
+-- here is rewritten for it; the first-seen event stays where it is.
+CREATE TABLE IF NOT EXISTS conflicting_events (
+    aid TEXT NOT NULL,
+    sequence_num INTEGER NOT NULL,
+    said TEXT NOT NULL,
+    raw_b64 TEXT NOT NULL,
+    cesr_signature TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    PRIMARY KEY (aid, said)
+);
 CREATE TABLE IF NOT EXISTS digest_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     aid TEXT NOT NULL,
@@ -276,4 +289,80 @@ func (s *ServiceStore) GetObservationDigest(aid string, seq int) (digest string,
 		return "", false, err
 	}
 	return digest, true, nil
+}
+
+// maxConflictingPerIdentity bounds what one identity can make this service keep.
+// Only an event its controller signed reaches here, so the bound is for a
+// controller that signs without end.
+const maxConflictingPerIdentity = 32
+
+// ConflictingEvent is an event kept beside the one this service holds at its place.
+type ConflictingEvent struct {
+	SequenceNum   int
+	SAID          string
+	RawB64        string
+	CesrSignature string
+}
+
+// KeepConflicting keeps a correctly signed event that conflicts with the one
+// held at its place, exactly as published. Keeping it again is a no-op.
+func (s *ServiceStore) KeepConflicting(aid string, sn int, said, rawB64, sig string) error {
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM conflicting_events WHERE aid=?`, aid).Scan(&n); err != nil {
+		return err
+	}
+	if n >= maxConflictingPerIdentity {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO conflicting_events (aid, sequence_num, said, raw_b64, cesr_signature, received_at) VALUES (?,?,?,?,?,?)`,
+		aid, sn, said, rawB64, sig, Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// ConflictingEvents are the events kept beside the ones held, in the order seen.
+func (s *ServiceStore) ConflictingEvents(aid string) ([]ConflictingEvent, error) {
+	rows, err := s.db.Query(`SELECT sequence_num, said, raw_b64, cesr_signature FROM conflicting_events WHERE aid=? ORDER BY sequence_num, received_at`, aid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ConflictingEvent
+	for rows.Next() {
+		var c ConflictingEvent
+		if err := rows.Scan(&c.SequenceNum, &c.SAID, &c.RawB64, &c.CesrSignature); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// PublishedEvents are the held events as their controller published and signed
+// them, by place. An event held before the bytes were kept has none.
+func (s *ServiceStore) PublishedEvents(aid string) (map[int]ConflictingEvent, error) {
+	rows, err := s.db.Query(`SELECT sequence_num, raw_b64, cesr_signature FROM kel_events WHERE aid=?`, aid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int]ConflictingEvent{}
+	for rows.Next() {
+		var c ConflictingEvent
+		if err := rows.Scan(&c.SequenceNum, &c.RawB64, &c.CesrSignature); err != nil {
+			return nil, err
+		}
+		out[c.SequenceNum] = c
+	}
+	return out, rows.Err()
+}
+
+// ObservedAt is when this service first saw the log through place seq, from its
+// own observation of it; "" when it has none.
+func (s *ServiceStore) ObservedAt(aid string, seq int) (string, error) {
+	var at string
+	err := s.db.QueryRow(`SELECT observed_at FROM observations WHERE aid=? AND sequence_num=?`, aid, seq).Scan(&at)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return at, err
 }

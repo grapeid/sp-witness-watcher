@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/grapeid/sp-witness-watcher/internal/digest"
 	"io"
 	"log"
 	"net"
@@ -255,6 +256,14 @@ func (s *Server) handleWitnessEvent(w http.ResponseWriter, r *http.Request) {
 	// this witness stopped carries on. Something else there is a conflict.
 	d, _, err := s.Store.AcceptEvent(req.AID, seq, event, base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature)
 	if errors.Is(err, store.ErrConflict) {
+		// Correctly signed (checked above) and different from what is held: a second
+		// history. It is kept as published, beside the first, so this service can
+		// hand over both. The first stays; nothing held is rewritten.
+		if kerr := s.Store.KeepConflicting(req.AID, seq, eventSAIDOf(event),
+			base64.StdEncoding.EncodeToString(rawEvent), req.CesrSignature); kerr != nil {
+			writeErr(w, http.StatusInternalServerError, kerr.Error())
+			return
+		}
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -346,7 +355,35 @@ func (s *Server) handleWitnessKel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	jsonOK(w, map[string]interface{}{"aid": aid, "kel": events, "count": len(events)})
+	// Each event goes out with the bytes it was published as and the controller's
+	// signature over them, so whoever asks can verify the log for itself rather
+	// than take this service's word for it. A log that cannot be verified cannot
+	// prove anything, either way.
+	published, err := s.Store.PublishedEvents(aid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, ev := range events {
+		if p, ok := published[digest.EventSeq(ev)]; ok && p.RawB64 != "" && p.CesrSignature != "" {
+			ev["raw_bytes_b64"], ev["cesr_signature"] = p.RawB64, p.CesrSignature
+		}
+	}
+	// The other histories seen, which is what lets a verifier holding the first one
+	// be shown the second, and the reverse.
+	rivals, err := s.Store.ConflictingEvents(aid)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	conflicting := make([]map[string]interface{}, 0, len(rivals))
+	for _, c := range rivals {
+		conflicting = append(conflicting, map[string]interface{}{
+			"sequence_number": c.SequenceNum, "said": c.SAID,
+			"raw_bytes_b64": c.RawB64, "cesr_signature": c.CesrSignature,
+		})
+	}
+	jsonOK(w, map[string]interface{}{"aid": aid, "kel": events, "conflicting": conflicting, "count": len(events)})
 }
 
 func (s *Server) handleKelDigest(w http.ResponseWriter, r *http.Request) {
@@ -365,9 +402,14 @@ func (s *Server) handleKelDigest(w http.ResponseWriter, r *http.Request) {
 	if aid != "" && seqStr != "" {
 		if d, ok, err := s.Store.GetObservationDigest(aid, seq); err == nil && ok {
 			since, _ := s.Store.ObservedSince(aid)
+			// first_seen_at is when this service saw the log through this place,
+			// from its own observation. It used to be the enrolment time, which
+			// said nothing of when anything was seen. observed_since stays what it
+			// was: how long this service has been looking at the identity.
+			seenAt, _ := s.Store.ObservedAt(aid, seq)
 			resp["digest"] = d
 			resp["observed_since"] = since
-			resp["first_seen_at"] = since
+			resp["first_seen_at"] = seenAt
 		}
 	}
 	unsigned, _ := json.Marshal(resp)
