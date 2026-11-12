@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/grapeid/sp-witness-watcher/internal/digest"
 	"io"
 	"log"
 	"net"
@@ -18,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/grapeid/sp-common/decode"
 	"github.com/grapeid/sp-common/sign"
+	"github.com/grapeid/sp-witness-watcher/internal/digest"
 	"github.com/grapeid/sp-witness-watcher/internal/store"
 )
 
@@ -403,9 +403,8 @@ func (s *Server) handleKelDigest(w http.ResponseWriter, r *http.Request) {
 		if d, ok, err := s.Store.GetObservationDigest(aid, seq); err == nil && ok {
 			since, _ := s.Store.ObservedSince(aid)
 			// first_seen_at is when this service saw the log through this place,
-			// from its own observation. It used to be the enrolment time, which
-			// said nothing of when anything was seen. observed_since stays what it
-			// was: how long this service has been looking at the identity.
+			// from its own observation. observed_since is how long this service has
+			// been looking at the identity.
 			seenAt, _ := s.Store.ObservedAt(aid, seq)
 			resp["digest"] = d
 			resp["observed_since"] = since
