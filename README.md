@@ -168,6 +168,7 @@ docker run -p 8092:8092 -v ww-data:/data sp-witness-watcher
 | `PORT` | `8092` | Listen port |
 | `HOST` | `0.0.0.0` | Listen address |
 | `WW_ROLES` | both | `witness`, `watcher`, or `witness,watcher` |
+| `TRUSTED_PROXIES` | none | Comma-separated IPs or CIDRs of the reverse proxies in front of this service. A forwarding header (`X-Forwarded-For`) is believed only from these; from anyone else it is ignored, so a caller cannot choose the address it is rate limited or recorded as. |
 | `WW_WITNESS_PUBLIC_URL` | the host the request arrived on | Public base URL of the witness role, returned by `/enroll` |
 | `WW_WATCHER_PUBLIC_URL` | the host the request arrived on | Public base URL of the watcher role, returned by `/enroll` |
 

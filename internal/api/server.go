@@ -35,7 +35,7 @@ func New(st *store.ServiceStore, id *sign.Identity) *Server {
 
 func (s *Server) Router() chi.Router {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Logger, middleware.Recoverer)
+	r.Use(middleware.RequestID, middleware.Logger, middleware.Recoverer)
 
 	r.Get("/health", s.handleHealth)
 	// Also under /api, for the same reason the witness routes are: an Identity
@@ -491,6 +491,10 @@ func (s *Server) handleKelDigest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleKelCheck(w http.ResponseWriter, r *http.Request) {
+	if !s.lim.allow(clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
 	var req struct {
 		AID    string `json:"aid"`
 		Seq    int    `json:"seq"`
@@ -505,8 +509,11 @@ func (s *Server) handleKelCheck(w http.ResponseWriter, r *http.Request) {
 	out := map[string]interface{}{"match": match}
 	if ok {
 		out["our_digest"] = d
-		since, _ := s.Store.ObservedSince(req.AID)
-		out["our_first_seen_at"] = since
+		// When this service first saw the log through this place, from its own
+		// observation, as the digest answer says it: not how long it has been
+		// looking at the identity.
+		seenAt, _ := s.Store.ObservedAt(req.AID, req.Seq)
+		out["our_first_seen_at"] = seenAt
 	}
 	jsonOK(w, out)
 }
@@ -585,14 +592,6 @@ func (l *ipLimiter) allow(ip string) bool {
 	}
 	l.hits[ip] = append(filt, now)
 	return true
-}
-
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // senderOf groups an address with the others one sender is likely to hold:
