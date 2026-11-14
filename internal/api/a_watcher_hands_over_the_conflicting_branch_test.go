@@ -176,3 +176,41 @@ func mustJSON(t *testing.T, v interface{}) []byte {
 	}
 	return b
 }
+
+// The cross-check says when this service first saw the log through the place
+// asked about, not when it began looking at the identity.
+//
+// Fails when /public/kel-check reports the enrolment time as our_first_seen_at.
+func TestTheCrossCheckDatesTheFirstSightingNotTheEnrolment(t *testing.T) {
+	router, _ := hexWorld(t)
+	c := newController(t)
+	enrol := httptest.NewRecorder()
+	router.ServeHTTP(enrol, httptest.NewRequest(http.MethodPost, "/enroll", bytes.NewReader(mustJSON(t, map[string]string{"aid": c.aid, "controller_aid": c.aid}))))
+	wantStatus(t, enrol, 200, "enrolment")
+
+	was := store.Now
+	t.Cleanup(func() { store.Now = was })
+	seenAt := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	store.Now = func() time.Time { return seenAt }
+	wantStatus(t, postSigned(t, router, c.aid, c.log[0], indexed(t, c.priv, c.log[0])), 200, "the inception")
+
+	dig := httptest.NewRecorder()
+	router.ServeHTTP(dig, httptest.NewRequest(http.MethodGet, "/public/kel-digest?aid="+c.aid+"&seq=0", nil))
+	var held map[string]interface{}
+	if err := json.Unmarshal(dig.Body.Bytes(), &held); err != nil || held["digest"] == nil {
+		t.Fatalf("no digest to check against: %s", dig.Body.String())
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/public/kel-check",
+		bytes.NewReader(mustJSON(t, map[string]interface{}{"aid": c.aid, "seq": 0, "digest": held["digest"]}))))
+	var out map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["match"] != true {
+		t.Fatalf("the check of the digest it holds did not match: %v", out)
+	}
+	if out["our_first_seen_at"] != seenAt.Format(time.RFC3339) {
+		t.Fatalf("our_first_seen_at %v, want the observation time %s (not the enrolment's)", out["our_first_seen_at"], seenAt.Format(time.RFC3339))
+	}
+}
